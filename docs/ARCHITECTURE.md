@@ -1,0 +1,165 @@
+# RepoPilot v1.1 Architecture
+
+## System overview
+
+```text
+Web UI (static, served at /)          MCP client (stdio)
+  │ REST + SSE                          │ JSON-RPC
+FastAPI application  ◄──────────────  repopilot mcp
+  ├── TaskService        events · WorkflowState checkpoints · resume · cancel
+  ├── ResearchWorkflow   bounded Planner → Researcher ⇄ Reviewer → Writer state machine
+  ├── ToolRegistry       schema-validated allowlist · read-only execution · observations
+  ├── AsyncAgentRuntime  shared budgets · retries · concurrency · fallback provenance
+  ├── HybridRetriever    BM25 × weak deterministic hashed-embedding bonus
+  ├── MemoryStore        task summaries · bounded recall · expiry
+  ├── RepositoryIngestor safe walk · versioned documents · line-window chunks
+  ├── Providers          Resilient(retry + circuit breaker + fallback) → live / deterministic
+  ├── Observability      typed trace · JSON redaction · Prometheus /metrics
+  └── Storage            SQLite/SQLAlchemy async (PostgreSQL-ready URL switch)
+```
+
+RepoPilot is a bounded multi-role Agent, not four independent autonomous Agents. Model calls make
+the decisions that benefit from language understanding; the Harness owns every permission,
+budget, state transition, citation rule, and fallback.
+
+## Workflow state machine
+
+```text
+Planner
+  │ structured ResearchPlan
+  ▼
+Researcher ── candidate evidence ──► Reviewer
+  ▲                                  │
+  │ additional_queries               ├─ evidence gap + review budget remains
+  └──────────────────────────────────┘
+                                     │ accepted evidence / limit reached
+                                     ▼
+                                   Writer
+                                     │
+                                     ▼
+                           citation validation → report
+                                └─ failure → evidence-only
+```
+
+`max_review_rounds` means the number of additional Researcher → Reviewer rounds allowed after the
+initial review. The state machine always terminates because review rounds, model steps, tool calls,
+tokens, timeouts, and duplicate tool fingerprints are bounded by code.
+
+### Planner
+
+In live-provider mode the Planner requests a JSON plan containing retrieval queries,
+subquestions, and completion criteria. RepoPilot parses, deduplicates, length-limits, and
+count-limits that output locally. Malformed JSON, Provider failure, or Provider fallback selects a
+deterministic lexical plan and marks the run degraded; it does not hand an invalid plan to later
+nodes. Deterministic mode directly creates the local plan and follows the same state transitions.
+
+### Researcher
+
+The Researcher is the only role allowed to request repository tools. Its tool surface is an
+explicit registry of read-only, idempotent operations such as repository search and chunk read.
+Every argument is checked against JSON Schema, every result becomes an observation, and repository
+content is treated as untrusted data that cannot change system rules or tool permissions.
+
+The model may choose which registered tool to call within its budget. Unknown tools, invalid
+arguments, timeouts, repeat fingerprints, and partial failures are recorded and mark the run
+degraded without discarding already collected valid evidence. Same-turn concurrency is allowed
+only when every selected tool is read-only.
+
+### Reviewer
+
+Review is deliberately split into two layers:
+
+1. A deterministic hard gate verifies the latest stored chunk still exists, removes duplicates,
+   applies score/coverage thresholds, and requires a resolvable source citation.
+2. In live-provider mode an LLM reviews relevance and entailment among hard-gate candidates and may
+   request bounded additional queries.
+
+The semantic reviewer can only remove evidence from the hard-gate set. It cannot promote a stale,
+low-coverage, duplicate, or unresolvable chunk. Malformed/fallback review output uses the hard-gate
+decision and marks the task degraded.
+
+### Writer
+
+The Writer receives only final accepted evidence; rejected chunks, raw repository indexes, and
+untrusted tool instructions are excluded from its prompt. A live model may add a synthesis with
+numbered `[n]` references. RepoPilot then validates that citations exist and stay within the
+accepted-evidence range. Invalid output, Provider fallback, or generation failure is discarded and
+the deterministic evidence section remains the report. With no accepted evidence, Writer is
+skipped and the workflow refuses unsupported conclusions.
+
+## Durable state and recovery
+
+Each node writes a versioned WorkflowState snapshot containing at least:
+
+- schema version, goal, and next node;
+- plan queries, subquestions, completion criteria, and pending revision queries;
+- candidate chunk IDs with retrieval score and coverage;
+- reviewed chunk IDs with accepted/rejected status, reason, and optional semantic score;
+- current review round and token/tool budget counters;
+- `degraded` plus structured degradation reasons.
+
+On resume, ResearchWorkflow restores this state and continues from the recorded node/round instead
+of discarding the checkpoint and restarting the entire workflow. Candidate IDs are resolved against
+the latest corpus; missing IDs indicate corpus drift, which is disclosed as degradation and causes
+safe re-research. Evidence persistence replaces the task's final review snapshot transactionally,
+so resume and review loops do not create duplicate rows.
+
+Duplicate tool fingerprints are scoped to one Researcher node execution and are not presented as an
+intra-node resumable log. Checkpoints are committed at node boundaries. This is node/round-level
+recovery, not byte-for-byte replay of an in-flight remote model request.
+
+## Provider and degraded semantics
+
+The OpenAI-compatible adapter is optional and receives base URL, model, and key only from settings.
+The resilient wrapper applies timeout, bounded retry, and circuit breaking before using the
+deterministic fallback. A fallback response carries explicit provenance (`fallback_used`) through
+model response, runtime trace, workflow state, and final task status; fallback never masquerades as
+a successful live-model answer.
+
+Optional enrichment failures preserve verified evidence and produce `degraded=true`. Failures that
+prevent evidence verification result in refusal rather than unsupported generation.
+
+## Evidence and retrieval
+
+Every repository claim in the deterministic report maps to a stored chunk citation of the form
+`source_uri:Lstart-Lend`. Document versions are content-addressed; current retrieval resolves the
+latest version. Tokenization emits lowercase words, snake_case subtokens, and CJK character bigrams.
+A deterministic feature-hash cosine score is only a weak bonus on top of BM25, not a learned semantic
+embedding. Model-based review does not change that retrieval claim.
+
+## Security boundaries
+
+- Secrets exist only in environment variables and are redacted from JSON logs and exception chains.
+- Repository documents and tool observations are untrusted data, never executable instructions.
+- The production workflow exposes only registered read-only repository tools; unknown names fail
+  closed.
+- Workspace resolution rejects traversal and symlink escapes for ingestion, uploads, and MCP reads.
+- Model decisions cannot increase permissions, bypass hard evidence gates, change budgets, or select
+  arbitrary filesystem/network operations.
+
+## Module map
+
+```text
+src/repopilot/
+  api.py             FastAPI app: REST, SSE, upload, metrics, static UI
+  cli.py             serve / ingest / eval / mcp subcommands
+  workflow.py        bounded multi-role ResearchWorkflow and WorkflowState
+  research_tools.py  schema-validated read-only repository tool registry
+  runtime.py         reusable model/tool loop, budgets, retries, fallback provenance
+  tools.py           ToolSpec and fail-closed ToolRegistry
+  service.py         task spawn, events/checkpoints, resume, cancellation
+  ingestion.py       safe workspace walk and line-citation chunking
+  retrieval.py       tokenization, BM25, hashed bonus, HybridRetriever
+  evaluation.py      fixed-dataset runner and release metrics
+  mcp.py             separate read-only MCP stdio surface
+  providers/         base, deterministic, openai_compatible, resilient, factory
+  storage/           tasks, documents, checkpoints, evidence, memory, eval runs
+```
+
+## Scope boundary
+
+The architecture is complete for a single-user, self-hosted, read-only repository research product.
+It does not claim enterprise multi-tenancy, distributed scheduling, internet-scale indexing, or
+measured live-provider throughput. Those require a durable worker queue, cross-replica event bus,
+tenant-aware storage and authorization, learned retrieval services, capacity tests, and operational
+SLOs rather than a change in marketing language.

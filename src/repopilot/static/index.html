@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RepoPilot</title>
+<style>
+  :root { --bg:#111310; --panel:#1b1d1a; --line:#34382f; --text:#f0f1ec; --dim:#a2a796; --accent:#4f8d73; --ok:#65aa83; --warn:#c7a453; --err:#c86b63; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.6 ui-sans-serif,system-ui,"PingFang SC","Microsoft YaHei",sans-serif; }
+  header { padding:14px 24px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:12px; }
+  header h1 { font-size:18px; margin:0; }
+  header span { color:var(--dim); font-size:12px; }
+  main { display:grid; grid-template-columns:minmax(260px,340px) minmax(0,1fr); gap:16px; padding:16px 24px; max-width:1280px; margin:0 auto; }
+  main > section { min-width:0; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; }
+  .panel h2 { font-size:13px; margin:0 0 10px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+  textarea, input { width:100%; background:#0d0f0c; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; }
+  textarea { min-height:72px; resize:vertical; }
+  button { min-height:38px; background:var(--accent); color:#fff; border:0; border-radius:8px; padding:8px 14px; font:inherit; cursor:pointer; margin-top:8px; }
+  button.secondary { background:#262b38; }
+  button:disabled { opacity:.5; cursor:default; }
+  ul#tasks { list-style:none; margin:0; padding:0; max-height:340px; overflow:auto; }
+  ul#tasks li { padding:8px 10px; border-radius:8px; cursor:pointer; border:1px solid transparent; }
+  ul#tasks li:hover { background:#1d2230; }
+  ul#tasks li.active { border-color:var(--accent); background:#1d2230; }
+  .goal { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .status { font-size:12px; }
+  .status.completed { color:var(--ok); } .status.running,.status.pending { color:var(--warn); }
+  .status.failed,.status.cancelled,.status.guarded { color:var(--err); }
+  #report { white-space:pre-wrap; overflow-wrap:anywhere; font-family:ui-monospace,Consolas,monospace; font-size:13px; background:#0d0f0c; border:1px solid var(--line); border-radius:8px; padding:12px; max-height:420px; overflow:auto; }
+  #events { overflow-wrap:anywhere; font-family:ui-monospace,monospace; font-size:12px; color:var(--dim); max-height:180px; overflow:auto; background:#0d0f0c; border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; }
+  .muted { color:var(--dim); font-size:12px; }
+  #evidence div { overflow-wrap:anywhere; border-left:3px solid var(--accent); padding:4px 10px; margin:8px 0; background:#0d0f0c; border-radius:0 8px 8px 0; }
+  #evidence .rejected { border-left-color:var(--err); opacity:.6; }
+  code { color:var(--accent); }
+  @media (max-width:760px) {
+    header { padding:12px 14px; align-items:flex-start; flex-direction:column; gap:2px; }
+    main { grid-template-columns:minmax(0,1fr); gap:12px; padding:12px; }
+    .panel { padding:12px; }
+    textarea { min-height:88px; }
+    button { flex:1 1 140px; }
+  }
+</style>
+</head>
+<body>
+<header><h1>RepoPilot</h1><span>证据优先的仓库研究 Agent</span></header>
+<main>
+  <section>
+    <div class="panel">
+      <h2>研究目标</h2>
+      <textarea id="goal" placeholder="例如: tool retry 逻辑在哪里,如何限制重试?"></textarea>
+      <div class="row">
+        <button id="create">创建任务</button>
+        <button id="ingest" class="secondary">摄取工作区</button>
+      </div>
+      <p class="muted" id="ingest-info"></p>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <h2>任务列表</h2>
+      <ul id="tasks"></ul>
+    </div>
+  </section>
+  <section>
+    <div class="panel">
+      <h2>报告 <span id="task-meta" class="muted"></span></h2>
+      <div id="report">选择或创建一个任务。</div>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <h2>证据链</h2>
+      <div id="evidence" class="muted">—</div>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <h2>事件流 (SSE)</h2>
+      <div id="events">—</div>
+    </div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let currentTask = null, source = null;
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  if (!response.ok) throw new Error((await response.json()).error?.message || response.status);
+  return response.json();
+}
+
+async function refreshTasks() {
+  const tasks = await api('/api/tasks');
+  $('tasks').innerHTML = tasks.map(t =>
+    `<li data-id="${t.id}" class="${t.id === currentTask ? 'active' : ''}">
+       <div class="goal">${t.goal.replace(/</g,'&lt;')}</div>
+       <span class="status ${t.status}">${t.status}${t.degraded ? ' · degraded' : ''}</span>
+     </li>`).join('');
+  for (const li of $('tasks').querySelectorAll('li'))
+    li.onclick = () => selectTask(li.dataset.id);
+}
+
+function renderEvidence(evidence) {
+  $('evidence').innerHTML = evidence.length ? evidence.map(e =>
+    `<div class="${e.review_status}"><code>${e.citation}</code> · score ${e.score.toFixed(3)} · ${e.review_status}<br>${e.quote.slice(0,160).replace(/</g,'&lt;')}</div>`
+  ).join('') : '—';
+}
+
+async function selectTask(id) {
+  currentTask = id;
+  await refreshTasks();
+  const task = await api(`/api/tasks/${id}`);
+  $('task-meta').textContent = `${task.status} · v${task.version}`;
+  $('report').textContent = task.final_report || '(运行中…)';
+  const evidence = await api(`/api/tasks/${id}/evidence`);
+  renderEvidence(evidence);
+  follow(id);
+}
+
+function follow(id) {
+  if (source) source.close();
+  $('events').textContent = '';
+  source = new EventSource(`/api/tasks/${id}/stream`);
+  source.onmessage = () => {};
+  const log = (ev) => {
+    $('events').textContent += ev.type + '\n';
+    $('events').scrollTop = $('events').scrollHeight;
+  };
+  for (const type of ['task.started','trace.workflow','trace.retrieval','trace.model','trace.tool',
+                      'task.completed','task.failed','task.cancelled','task.resumed','stream.end'])
+    source.addEventListener(type, (ev) => {
+      log(ev);
+      if (type.startsWith('task.') || type === 'stream.end') selectTaskSilently(id);
+      if (type === 'stream.end') source.close();
+    });
+}
+
+async function selectTaskSilently(id) {
+  const [task, evidence] = await Promise.all([
+    api(`/api/tasks/${id}`),
+    api(`/api/tasks/${id}/evidence`)
+  ]);
+  $('task-meta').textContent = `${task.status} · v${task.version}`;
+  if (task.final_report) $('report').textContent = task.final_report;
+  renderEvidence(evidence);
+  await refreshTasks();
+}
+
+$('create').onclick = async () => {
+  const goal = $('goal').value.trim();
+  if (!goal) return;
+  const task = await api('/api/tasks', {
+    method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({goal})
+  });
+  $('goal').value = '';
+  await selectTask(task.id);
+};
+
+$('ingest').onclick = async () => {
+  $('ingest').disabled = true;
+  try {
+    const report = await api('/api/ingest', {
+      method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'
+    });
+    $('ingest-info').textContent =
+      `已摄取 ${report.ingested_documents} 文档 / ${report.chunks} chunks (未变更 ${report.unchanged_documents})`;
+  } finally { $('ingest').disabled = false; }
+};
+
+refreshTasks();
+</script>
+</body>
+</html>

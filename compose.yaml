@@ -1,0 +1,16 @@
+services:
+  repopilot:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      REPOPILOT_PROVIDER: ${REPOPILOT_PROVIDER:-deterministic}
+      REPOPILOT_LLM_BASE_URL: ${REPOPILOT_LLM_BASE_URL:-}
+      REPOPILOT_LLM_API_KEY: ${REPOPILOT_LLM_API_KEY:-}
+      REPOPILOT_LLM_MODEL: ${REPOPILOT_LLM_MODEL:-}
+      REPOPILOT_API_TOKEN: ${REPOPILOT_API_TOKEN:-}
+    volumes:
+      - repopilot-data:/app/data
+      - ${REPOPILOT_WORKSPACE:-.}:/workspace:ro
+volumes:
+  repopilot-data:

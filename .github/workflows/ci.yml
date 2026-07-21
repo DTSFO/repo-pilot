@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync --frozen --all-extras
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy src
+      - run: uv run pytest --cov=repopilot --cov-branch
+      - run: uv run repopilot eval --output /tmp/repopilot-eval.json
+      - name: Enforce evaluation gates
+        run: |
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("/tmp/repopilot-eval.json").read_text())
+          metrics = report["metrics"]
+          minimums = {
+              "task_success_rate": 0.9,
+              "recall_at_5": 0.85,
+              "citation_precision": 1.0,
+              "citation_validity": 1.0,
+              "refusal_accuracy": 1.0,
+          }
+          maximums = {
+              "unsupported_answer_rate": 0.0,
+              "degraded_case_rate": 0.0,
+              "fallback_case_rate": 0.0,
+          }
+          for name, minimum in minimums.items():
+              if metrics[name] < minimum:
+                  raise SystemExit(f"{name}={metrics[name]!r}, minimum {minimum!r}")
+          for name, maximum in maximums.items():
+              if metrics[name] > maximum:
+                  raise SystemExit(f"{name}={metrics[name]!r}, maximum {maximum!r}")
+          if report["schema_version"] != "1.1":
+              raise SystemExit(f"unexpected evaluation schema: {report['schema_version']!r}")
+          if not report["generated_at"].endswith("Z"):
+              raise SystemExit("generated_at must be UTC")
+          if len(report["dataset_metadata"]["fingerprint"]) != 64:
+              raise SystemExit("dataset fingerprint must be SHA-256")
+          if metrics["claim_support_evaluated"] or metrics["claim_support_rate"] is not None:
+              raise SystemExit("claim support requires explicit claim-level labels")
+          if metrics["semantic_review_evaluated"]:
+              raise SystemExit("semantic review requires labeled reviewer decisions")
+          semantic_metrics = (
+              "semantic_review_precision",
+              "semantic_review_recall",
+              "semantic_review_f1",
+              "adversarial_decoy_rejection_rate",
+          )
+          if any(metrics[name] is not None for name in semantic_metrics):
+              raise SystemExit("unlabeled semantic review metrics must be null")
+          if metrics["revision_success_evaluated"] or metrics["revision_success_rate"] is not None:
+              raise SystemExit("deterministic dataset has no revision-request cases")
+          PY
+      - run: docker build -t repopilot:ci .

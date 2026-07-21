@@ -1,0 +1,349 @@
+{
+  "run_id": "d6a58cb2-e1aa-48ba-b2ea-d801ba0e0113",
+  "dataset": "dataset",
+  "corpus": {
+    "documents": 57,
+    "fingerprint": "2e1ad21a686eb71f6288823f4a70d008fe18a02de62934295f154528b80eb807"
+  },
+  "metrics": {
+    "cases": 30,
+    "task_success_rate": 1.0,
+    "recall_at_5": 1.0,
+    "citation_precision": 1.0,
+    "refusal_accuracy": 1.0,
+    "unsupported_claim_rate": 0.0,
+    "p95_latency_ms": 104.496
+  },
+  "cases": [
+    {
+      "case_id": "runtime-retry",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 5,
+      "citations_resolvable": 5,
+      "keywords_hit": true,
+      "latency_ms": 108.509,
+      "success": true
+    },
+    {
+      "case_id": "runtime-concurrent",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 5,
+      "citations_resolvable": 5,
+      "keywords_hit": true,
+      "latency_ms": 92.682,
+      "success": true
+    },
+    {
+      "case_id": "runtime-budget",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 5,
+      "citations_resolvable": 5,
+      "keywords_hit": true,
+      "latency_ms": 84.196,
+      "success": true
+    },
+    {
+      "case_id": "runtime-duplicate",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 4,
+      "citations_resolvable": 4,
+      "keywords_hit": true,
+      "latency_ms": 80.93,
+      "success": true
+    },
+    {
+      "case_id": "tools-schema",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 5,
+      "citations_resolvable": 5,
+      "keywords_hit": true,
+      "latency_ms": 87.025,
+      "success": true
+    },
+    {
+      "case_id": "tools-async",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 3,
+      "citations_resolvable": 3,
+      "keywords_hit": true,
+      "latency_ms": 80.444,
+      "success": true
+    },
+    {
+      "case_id": "retrieval-bm25",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 2,
+      "citations_resolvable": 2,
+      "keywords_hit": true,
+      "latency_ms": 76.734,
+      "success": true
+    },
+    {
+      "case_id": "retrieval-tokenize",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 2,
+      "citations_resolvable": 2,
+      "keywords_hit": true,
+      "latency_ms": 77.171,
+      "success": true
+    },
+    {
+      "case_id": "ingest-chunk",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 4,
+      "citations_resolvable": 4,
+      "keywords_hit": true,
+      "latency_ms": 76.738,
+      "success": true
+    },
+    {
+      "case_id": "ingest-safety",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 5,
+      "citations_resolvable": 5,
+      "keywords_hit": true,
+      "latency_ms": 82.354,
+      "success": true
+    },
+    {
+      "case_id": "ingest-skip",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 4,
+      "citations_resolvable": 4,
+      "keywords_hit": true,
+      "latency_ms": 78.16,
+      "success": true
+    },
+    {
+      "case_id": "api-sse",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 4,
+      "citations_resolvable": 4,
+      "keywords_hit": true,
+      "latency_ms": 78.895,
+      "success": true
+    },
+    {
+      "case_id": "api-auth",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 4,
+      "citations_resolvable": 4,
+      "keywords_hit": true,
+      "latency_ms": 78.613,
+      "success": true
+    },
+    {
+      "case_id": "api-ready",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 4,
+      "citations_resolvable": 4,
+      "keywords_hit": true,
+      "latency_ms": 85.693,
+      "success": true
+    },
+    {
+      "case_id": "service-checkpoint",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 6,
+      "citations_resolvable": 6,
+      "keywords_hit": true,
+      "latency_ms": 82.75,
+      "success": true
+    },
+    {
+      "case_id": "service-resume",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 6,
+      "citations_resolvable": 6,
+      "keywords_hit": true,
+      "latency_ms": 79.744,
+      "success": true
+    },
+    {
+      "case_id": "service-cancel",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 4,
+      "citations_resolvable": 4,
+      "keywords_hit": true,
+      "latency_ms": 82.411,
+      "success": true
+    },
+    {
+      "case_id": "workflow-nodes",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 4,
+      "citations_resolvable": 4,
+      "keywords_hit": true,
+      "latency_ms": 78.154,
+      "success": true
+    },
+    {
+      "case_id": "workflow-refusal",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 4,
+      "citations_resolvable": 4,
+      "keywords_hit": true,
+      "latency_ms": 78.409,
+      "success": true
+    },
+    {
+      "case_id": "provider-circuit",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 4,
+      "citations_resolvable": 4,
+      "keywords_hit": true,
+      "latency_ms": 77.627,
+      "success": true
+    },
+    {
+      "case_id": "provider-openai",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 4,
+      "citations_resolvable": 4,
+      "keywords_hit": true,
+      "latency_ms": 78.531,
+      "success": true
+    },
+    {
+      "case_id": "provider-offline",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 4,
+      "citations_resolvable": 4,
+      "keywords_hit": true,
+      "latency_ms": 101.212,
+      "success": true
+    },
+    {
+      "case_id": "storage-models",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 4,
+      "citations_resolvable": 4,
+      "keywords_hit": true,
+      "latency_ms": 79.025,
+      "success": true
+    },
+    {
+      "case_id": "config-settings",
+      "completed": true,
+      "refused": false,
+      "recall_hit": true,
+      "citations_total": 4,
+      "citations_resolvable": 4,
+      "keywords_hit": true,
+      "latency_ms": 79.493,
+      "success": true
+    },
+    {
+      "case_id": "refuse-cooking",
+      "completed": true,
+      "refused": true,
+      "recall_hit": null,
+      "citations_total": 0,
+      "citations_resolvable": 0,
+      "keywords_hit": true,
+      "latency_ms": 79.731,
+      "success": true
+    },
+    {
+      "case_id": "refuse-quantum",
+      "completed": true,
+      "refused": true,
+      "recall_hit": null,
+      "citations_total": 0,
+      "citations_resolvable": 0,
+      "keywords_hit": true,
+      "latency_ms": 76.059,
+      "success": true
+    },
+    {
+      "case_id": "refuse-weather",
+      "completed": true,
+      "refused": true,
+      "recall_hit": null,
+      "citations_total": 0,
+      "citations_resolvable": 0,
+      "keywords_hit": true,
+      "latency_ms": 76.723,
+      "success": true
+    },
+    {
+      "case_id": "refuse-stock",
+      "completed": true,
+      "refused": true,
+      "recall_hit": null,
+      "citations_total": 0,
+      "citations_resolvable": 0,
+      "keywords_hit": true,
+      "latency_ms": 80.672,
+      "success": true
+    },
+    {
+      "case_id": "refuse-poem",
+      "completed": true,
+      "refused": true,
+      "recall_hit": null,
+      "citations_total": 0,
+      "citations_resolvable": 0,
+      "keywords_hit": true,
+      "latency_ms": 76.366,
+      "success": true
+    },
+    {
+      "case_id": "refuse-football",
+      "completed": true,
+      "refused": true,
+      "recall_hit": null,
+      "citations_total": 0,
+      "citations_resolvable": 0,
+      "keywords_hit": true,
+      "latency_ms": 79.468,
+      "success": true
+    }
+  ]
+}
