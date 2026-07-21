@@ -1,11 +1,16 @@
-# RepoPilot v1.1 Release Gates
+# RepoPilot v1.2 Release Gates
 
-`v1.0.0` remains the historical frozen baseline. `v1.1.0` is frozen only when every required gate
-below passes against the packaged source. Checkboxes must reflect command output or an inspectable
-test; they are not product claims by themselves.
+`v1.0.0` remains the historical baseline and `v1.1.0` remains the last frozen measured release.
+`v1.2.0` is frozen only when every required gate below passes against the packaged source.
+Checkboxes must reflect command output or an inspectable test; they are not product claims by
+themselves.
 
 ## Agentic workflow
 
+- [x] Default orchestration is a compiled LangGraph `StateGraph`, and graph inspection exposes the
+  Planner → Researcher ⇄ Reviewer → Writer topology.
+- [x] Researcher retains a model-driven inner tool loop; LangGraph does not replace tool selection
+  with hard-coded per-tool routing nodes.
 - [x] Live Planner produces a schema-valid plan that actually drives repository retrieval.
 - [x] Malformed, failed, or fallback Planner output uses a deterministic plan and sets degraded.
 - [x] Researcher model tool calls execute only through the registered read-only repository tools.
@@ -33,6 +38,11 @@ test; they are not product claims by themselves.
 - [x] REST, SSE, web UI, MCP, and evaluation runner operate against the same persisted task state.
 - [x] SSE `Last-Event-ID` replay emits only events newer than the requested sequence before live
   continuation.
+- [x] Documentation and tests describe SSE as SQLite event-table short polling, not push pub/sub.
+- [x] Recovery is described as committed node/round recovery, not replay of an in-flight Provider
+  request or an exactly-once side-effect guarantee.
+- [x] SQLAlchemy TaskStore remains the single durable recovery source; LangGraph executes the graph
+  without a second saver or checkpoint dual-write path.
 
 ## Reliability and security
 
@@ -58,17 +68,22 @@ test; they are not product claims by themselves.
   reviewer decisions exist; otherwise the report explicitly marks them unevaluated and sets each
   unavailable value to `null`.
 - [x] Revision success, revision-limit, fallback, degraded, task success, and P95 latency are
-  reported.
+  reported in `evals/v1.2-report.json`: 30 cases, task success 0.9667, Recall@5 0.9583,
+  citation validity/precision 1.0, refusal accuracy 1.0, degraded/fallback 0, repeated local P95
+  about 0.35–0.40s.
+- [x] Retrieval labels use canonical repository paths with exact file or explicit directory-prefix
+  matching, and every case records its Top-5 sources; similarly named tests/docs cannot create a
+  hidden Recall hit.
 - [x] Live-provider quality/latency results identify endpoint, model, dataset, date, and run config;
   otherwise docs explicitly state that only deterministic offline results exist.
 
 ## Quality and delivery
 
-- [x] `uv run pytest` passes.
-- [x] `uv run ruff check .` and `uv run ruff format --check .` pass.
-- [x] `uv run mypy src` passes in strict mode.
+- [x] `uv run pytest` passes: 108 tests.
+- [x] `uv run ruff check .` and `uv run ruff format --check .` pass for the v1.2 checkout.
+- [x] `uv run mypy src` passes in strict mode for the v1.2 checkout.
 - [x] Branch coverage meets the configured threshold and critical workflow/provider/state paths are
-  exercised.
+  exercised: 86.35% against the 85% gate.
 - [x] Frontend JavaScript syntax checks and Playwright desktop/mobile smoke tests pass with no
   console errors or layout overflow.
 - [x] `uv lock --check --offline`, dependency checks, wheel/sdist build, and artifact-content checks
@@ -80,14 +95,14 @@ test; they are not product claims by themselves.
 ## Documentation and freeze artifact
 
 - [x] README, architecture, product specification, release gates, and teaching-site wording describe
-  the bounded v1.1 workflow and preserve v1.0 metrics as historical data.
+  the v1.2 StateGraph/inner-loop split and preserve v1.0/v1.1 measurements as historical data.
 - [x] Documentation distinguishes model decisions from Harness-enforced rules and avoids calling the
   system four autonomous Agents.
 - [x] Documentation does not claim live throughput/model quality without a measured benchmark.
 - [x] OpenAPI, configuration, acceptance report, changelog, package version, and built artifacts
-  agree on `1.1.0`.
-- [x] Final command outputs, package/image digests, SHA-256 checksums, and the v1.1 evaluation report
-  are recorded in `docs/ACCEPTANCE.md` without rewriting the v1.0 record.
+  agree on `1.2.0`.
+- [x] Final command outputs, package/image digests, SHA-256 checksums, and the v1.2 evaluation report
+  are recorded in `docs/ACCEPTANCE.md` without rewriting the v1.0/v1.1 record.
 
 ## Reproducible release procedure
 
@@ -96,7 +111,8 @@ builds the wheel and sdist in a temporary directory, rejects forbidden credentia
 writes `release/release-manifest.json` plus `release/SHA256SUMS` outside the packaged artifacts.
 Run `python scripts/check_release.py release` to verify both files. Because the manifest is external,
 artifact bytes do not contain a hash of themselves (or of the checksum file). The mutable final
-acceptance record is also excluded from the sdist, so recording final artifact hashes cannot change
-the artifacts being recorded. Docker and Compose gates should be run against the same checkout with
+acceptance record and generated evaluation reports are also excluded from the sdist. The dataset and
+historical baseline remain packaged, while rerunning a timestamped report cannot change the source
+artifact being recorded. Docker and Compose gates should be run against the same checkout with
 `docker build .` and `docker compose config`; record their observed digests and smoke output in the
 acceptance record only after execution.

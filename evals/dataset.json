@@ -4,168 +4,168 @@
     {
       "id": "runtime-retry",
       "goal": "tool retryable idempotent max attempts exponential sleep",
-      "expected_source": "runtime.py",
+      "expected_source": "src/repopilot/runtime.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "runtime-concurrent",
       "goal": "read only tools concurrent execution asyncio gather",
-      "expected_source": "runtime.py",
+      "expected_source": "src/repopilot/runtime.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "runtime-budget",
       "goal": "token budget max_total_tokens guard stop",
-      "expected_source": "runtime.py",
+      "expected_source": "src/repopilot/runtime.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "runtime-duplicate",
       "goal": "repeated duplicate tool call blocked fingerprint",
-      "expected_source": "runtime.py",
+      "expected_source": "src/repopilot/runtime.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "tools-schema",
       "goal": "tool registry json schema from type hints annotation",
-      "expected_source": "tools.py",
+      "expected_source": "src/repopilot/tools.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "tools-async",
       "goal": "aexecute coroutine to_thread sync tool execution",
-      "expected_source": "tools.py",
+      "expected_source": "src/repopilot/tools.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "retrieval-bm25",
       "goal": "BM25 lexical retriever scoring idf document frequency",
-      "expected_source": "retrieval.py",
+      "expected_source": "src/repopilot/retrieval.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "retrieval-tokenize",
       "goal": "tokenize CJK characters lowercase word tokens",
-      "expected_source": "retrieval.py",
+      "expected_source": "src/repopilot/retrieval.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "ingest-chunk",
       "goal": "chunk_lines line window overlap citation line numbers",
-      "expected_source": "ingestion.py",
+      "expected_source": "src/repopilot/ingestion.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "ingest-safety",
       "goal": "resolve_safe_path workspace root path traversal rejected",
-      "expected_source": "ingestion.py",
+      "expected_source": "src/repopilot/ingestion.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "ingest-skip",
       "goal": "skipped directories git node_modules binary files ingestion",
-      "expected_source": "ingestion.py",
+      "expected_source": "src/repopilot/ingestion.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "api-sse",
       "goal": "SSE stream event replay Last-Event-ID stream.end",
-      "expected_source": "api.py",
+      "expected_source": "src/repopilot/api.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "api-auth",
       "goal": "require_token bearer authorization api token",
-      "expected_source": "api.py",
+      "expected_source": "src/repopilot/api.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "api-ready",
       "goal": "readiness probe database session connection ready endpoint",
-      "expected_source": "api.py",
+      "expected_source": "src/repopilot/api.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "service-checkpoint",
       "goal": "save_checkpoint on_step trace events append_event task",
-      "expected_source": "service.py",
+      "expected_source": "src/repopilot/service.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "service-resume",
       "goal": "resume_task latest_checkpoint initial_messages restore",
-      "expected_source": "service.py",
+      "expected_source": "src/repopilot/service.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "service-cancel",
       "goal": "cancel running task persists cancelled state",
-      "expected_source": "service.py",
+      "expected_source": "src/repopilot/service.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "workflow-nodes",
       "goal": "planner researcher reviewer writer workflow nodes",
-      "expected_source": "workflow.py",
+      "expected_source": "src/repopilot/workflow.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "workflow-refusal",
       "goal": "refuses unsupported conclusions without accepted evidence",
-      "expected_source": "workflow.py",
+      "expected_source": "src/repopilot/workflow.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "provider-circuit",
       "goal": "circuit breaker failure threshold recovery seconds provider",
-      "expected_source": "resilient.py",
+      "expected_source": "src/repopilot/providers/resilient.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "provider-openai",
       "goal": "openai compatible chat completions httpx provider",
-      "expected_source": "openai_compatible.py",
+      "expected_source": "src/repopilot/providers/openai_compatible.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "provider-offline",
       "goal": "deterministic offline provider fallback responses",
-      "expected_source": "deterministic.py",
+      "expected_source": "src/repopilot/providers/deterministic.py",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "storage-models",
       "goal": "research task record checkpoint evidence sqlalchemy models",
-      "expected_source": "storage/",
+      "expected_source": "src/repopilot/storage/",
       "expected_keywords": [],
       "expect_refusal": false
     },
     {
       "id": "config-settings",
       "goal": "pydantic settings environment variables REPOPILOT prefix",
-      "expected_source": "config.py",
+      "expected_source": "src/repopilot/config.py",
       "expected_keywords": [],
       "expect_refusal": false
     },

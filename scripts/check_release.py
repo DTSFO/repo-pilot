@@ -7,11 +7,20 @@ import argparse
 import hashlib
 import json
 import re
+import tomllib
 from pathlib import Path
 
-EXPECTED_PROJECT = "repo-pilot"
-EXPECTED_VERSION = "1.1.0"
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+
+
+def project_metadata(root: Path) -> tuple[str, str]:
+    payload = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    project = payload.get("project", {})
+    name = project.get("name")
+    version = project.get("version")
+    if not isinstance(name, str) or not isinstance(version, str):
+        raise SystemExit("pyproject.toml is missing project name/version")
+    return name, version
 
 
 def digest(path: Path) -> str:
@@ -27,8 +36,9 @@ def main() -> int:
     parser.add_argument("release_dir", type=Path)
     args = parser.parse_args()
     root = args.release_dir.resolve()
+    expected_project, expected_version = project_metadata(Path(__file__).resolve().parents[1])
     manifest = json.loads((root / "release-manifest.json").read_text(encoding="utf-8"))
-    if manifest.get("project") != EXPECTED_PROJECT or manifest.get("version") != EXPECTED_VERSION:
+    if manifest.get("project") != expected_project or manifest.get("version") != expected_version:
         raise SystemExit("manifest project/version mismatch")
     records = manifest.get("artifacts", [])
     if not isinstance(records, list) or not records:

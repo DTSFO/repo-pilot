@@ -53,6 +53,7 @@ class CaseResult:
     revision_requests: int
     revision_rounds: int
     revision_limit_reached: bool
+    top_sources: tuple[str, ...] = ()
 
     @property
     def fallback_used(self) -> bool:
@@ -181,6 +182,8 @@ class EvaluationRunner:
             "models_observed": sorted(observed_provider.models),
         }
         run_config = {
+            "orchestrator": "langgraph",
+            "graph_name": "repopilot-research-workflow",
             "recall_k": RECALL_K,
             "max_review_rounds": self.settings.max_review_rounds,
             "max_steps": self.settings.max_steps,
@@ -281,9 +284,11 @@ class EvaluationRunner:
             if source in line_counts and int(end) <= line_counts[source]
         )
         recall_hit: bool | None = None
+        top_sources = tuple(source for source, _start, _end in citations[:RECALL_K])
         if case.expected_source is not None:
-            top_sources = [source for source, _s, _e in citations[:RECALL_K]]
-            recall_hit = any(case.expected_source in source for source in top_sources)
+            recall_hit = any(
+                self._source_matches(source, case.expected_source) for source in top_sources
+            )
         keywords_hit = all(keyword in report for keyword in case.expected_keywords)
         if case.expect_refusal:
             keywords_hit = True
@@ -306,7 +311,18 @@ class EvaluationRunner:
             revision_requests=revision_requests,
             revision_rounds=revision_rounds,
             revision_limit_reached="review_limit_reached" in degraded_reasons,
+            top_sources=top_sources,
         )
+
+    @staticmethod
+    def _source_matches(actual: str, expected: str) -> bool:
+        """Match an exact file label or an explicitly declared directory prefix."""
+
+        normalized_actual = actual.replace("\\", "/").lstrip("./")
+        normalized_expected = expected.replace("\\", "/").lstrip("./")
+        if normalized_expected.endswith("/"):
+            return normalized_actual.startswith(normalized_expected)
+        return normalized_actual == normalized_expected
 
     @staticmethod
     def _workflow_observations(result: AgentRunResult) -> tuple[tuple[str, ...], int, int]:

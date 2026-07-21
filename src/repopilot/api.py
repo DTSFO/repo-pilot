@@ -177,7 +177,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await provider.close()
             await database.close()
 
-    app = FastAPI(title="RepoPilot", version="1.1.0", lifespan=lifespan)
+    app = FastAPI(title="RepoPilot", version="1.2.0", lifespan=lifespan)
 
     @app.middleware("http")
     async def observe_requests(request: Request, call_next: Any) -> Any:

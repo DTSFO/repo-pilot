@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.0 — 2026-07-21
+
+- 将默认控制平面迁移为真实 LangGraph `StateGraph`，显式编译
+  Planner → Researcher ⇄ Reviewer → Writer 拓扑和 Reviewer 条件返工边。
+- 保留 Researcher 节点内部的模型驱动只读工具循环，避免把模型决策硬编码成逐工具图节点。
+- 继续以 SQLAlchemy `TaskStore` 作为任务、事件与 WorkflowState Checkpoint 的单一持久恢复真源，
+  不引入第二套 LangGraph saver 双写。
+- 增加图拓扑、正常/返工路径、节点提交事件和无降级完整流程测试；发布评测记录
+  `orchestrator=langgraph` 与图名，同时保持 schema 1.1 兼容。
+- 明确 SSE 为 SQLite 事件表短轮询，Checkpoint 为已提交节点/轮次恢复，不宣称 Pub/Sub、
+  在途 Provider 请求重放或 exactly-once。
+
 ## 1.1.0 — 2026-07-21
 
 - 将研究主链升级为模型驱动、证据优先且受 Harness 约束的有界多角色状态机。

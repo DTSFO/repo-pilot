@@ -1,5 +1,63 @@
 # RepoPilot 验收记录
 
+## v1.2.0 验收状态
+
+v1.2 已将默认控制平面迁移为真实 LangGraph `StateGraph`，显式表达
+Planner → Researcher ⇄ Reviewer → Writer；角色内部仍保留模型驱动工具循环，证据硬门槛、
+节点/轮次恢复、SSE `Last-Event-ID` 与 deterministic baseline 契约不变。源码、评测、浏览器、
+wheel/sdist、Docker/Compose、恢复、持久化和降级路径均已按本节实测冻结，v1.2.0 在单用户、
+自托管、只读仓库研究的产品范围内完成发布验收。
+
+| 检查 | v1.2 实际结果 |
+| --- | --- |
+| 默认编排 | 真实编译 `StateGraph`；Planner → Researcher ⇄ Reviewer → Writer |
+| 测试 | 108 passed；Ruff、format、strict Mypy 全部通过 |
+| 分支覆盖率 | 86.35%，超过 85% 门槛 |
+| 固定离线评测 | 30 cases；task success 0.9667；Recall@5 0.9583；citation validity/precision 1.0；refusal accuracy 1.0；degraded/fallback 0；本机重复运行 P95 约 0.35–0.40s |
+| 评测可信性 | schema 1.1；完整路径 exact/目录 prefix 标签；每 case 记录 Top-5；两次顺序复跑非延迟指标一致 |
+| 前端 | Playwright 1440×900 与 390×844：真实摄取/任务/SSE 成功，无 console error/warning 或横向溢出 |
+| 发布包与容器 | 2 个 v1.2.0 发行包校验通过；Docker 非 root；API/SSE/metrics/resume/degraded/重启持久化和 Compose 通过 |
+
+### v1.2 已验证行为
+
+- Graph inspection 能看到四个命名节点和 Reviewer 条件返工边。
+- Researcher 的模型 → 工具 → observation 循环仍受只读 allowlist 和全部预算约束。
+- Checkpoint 恢复的是已提交节点/轮次状态，不宣称重放在途 Provider HTTP 请求。
+- SSE 继续从 SQLite 事件表短轮询；`Last-Event-ID` 只补发已提交且序号更大的事件。
+- SQLAlchemy `TaskStore` 是任务、事件与 WorkflowState Checkpoint 的单一持久恢复真源；
+  LangGraph 只负责执行图，不使用第二套 saver，避免双写与恢复状态分叉。
+- Reviewer 提交后若语料在 Writer 入场前漂移，Writer 清空旧 Evidence、标记
+  `corpus_drift`、跳过模型调用并安全拒答；不新增可能在持续摄取下失活的 Writer 回边。
+- expected source 不再用 basename 子串判断；`tests/test_agentic_workflow.py` 不能冒充
+  `src/repopilot/workflow.py` 命中。当前唯一 Recall miss 是 `workflow-refusal`，其 Top-5
+  由测试/设计文档占据，未通过修改标签或隐藏结果抹平。
+- 30-case 评测仍明确 `claim_support_evaluated=false`、
+  `semantic_review_evaluated=false`；相应 rate/P/R/F1 保持 `null`。
+
+### v1.2 发布产物
+
+| 产物 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `repo_pilot-1.2.0-py3-none-any.whl` | 67,844 | `74a29d1e000a19b5ce4371f18ae9f077014f0a01eb95475754ae066351070e4a` |
+| `repo_pilot-1.2.0.tar.gz` | 194,048 | `f51385a97874b80ea685f753ce04d06acc2670a08ab042d6577106f26d671d18` |
+
+`scripts/check_release.py` 验证 manifest、文件大小、SHA-256、发行包集合和外部
+`SHA256SUMS` 一致；版本从 `pyproject.toml` 单一读取，不再在 release 脚本中写死。使用两个
+独立临时构建目录连续构建，wheel 与 sdist 均逐字节一致。生成型 eval report 和本验收记录
+不进入 sdist，避免时间戳、P95 或事后填写的哈希反向改变被记录产物；dataset 与 historical
+baseline 仍保留在源码包中。
+
+最终本地镜像为 `repopilot:1.2.0`，以 `repopilot` 用户运行，Image ID/本地 RepoDigest 为
+`sha256:ececd1ca57c1bcbbd8bbc486d1e5c83f96437bed903c55ee9f91d700c5b0f866`，inspect 大小
+78,889,107 bytes。容器实测摄取 63 个文档，任务 `completed` 且 `degraded=false`，5 条
+Evidence 全部 accepted，11 个持久事件，`Last-Event-ID` SSE 回放、metrics 和删除/重建
+容器后的 SQLite 数据均通过。独立任务还实测 cancel → resume → completed（14 个事件、
+非 degraded），空工作区实测 `degraded=true` 并明确拒答。唯一命名的 Compose smoke project
+验证只读 `/workspace`、可写命名卷、`/ready` 与无嵌入 secret，测试后已清理其容器、网络和卷。
+
+该 digest 是本地构建证明，不是远程 Registry 推送证明；deterministic 评测也不是实时模型
+质量、吞吐或容量结论。
+
 ## v1.1.0 验收状态
 
 日期：2026-07-21 · 范围：模型驱动、证据优先、受 Harness 约束的有界多角色研究 Agent

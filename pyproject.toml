@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "repo-pilot"
-version = "1.1.0"
-description = "Model-driven, evidence-first bounded repository research agent with citations and recovery"
+version = "1.2.0"
+description = "LangGraph-orchestrated, evidence-first repository research agent with citations and recovery"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
@@ -14,6 +14,7 @@ dependencies = [
   "aiosqlite>=0.20,<1",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
+  "langgraph>=1.2,<2",
   "orjson>=3.10,<4",
   "prometheus-client>=0.21,<1",
   "pydantic>=2.10,<3",
@@ -43,7 +44,12 @@ repopilot = "repopilot.cli:main"
 packages = ["src/repopilot"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["/docs/ACCEPTANCE.md", "/release"]
+exclude = [
+  "/docs/ACCEPTANCE.md",
+  "/evals/*-report.json",
+  "/evals/report.json",
+  "/release",
+]
 
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers --strict-config"

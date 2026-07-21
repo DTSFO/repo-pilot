@@ -82,7 +82,7 @@ class McpServer:
                 {
                     "protocolVersion": PROTOCOL_VERSION,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "repopilot", "version": "1.1.0"},
+                    "serverInfo": {"name": "repopilot", "version": "1.2.0"},
                 },
             )
         if method == "notifications/initialized":

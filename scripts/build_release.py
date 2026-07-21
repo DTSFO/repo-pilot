@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -26,6 +27,16 @@ FORBIDDEN_BASENAMES = {
 }
 FORBIDDEN_NAME_TOKENS = ("api_key", "apikey", "secret")
 EXTERNAL_RELEASE_RECORDS = ("docs/acceptance.md",)
+
+
+def project_metadata(root: Path) -> tuple[str, str]:
+    payload = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    project = payload.get("project", {})
+    name = project.get("name")
+    version = project.get("version")
+    if not isinstance(name, str) or not isinstance(version, str):
+        raise SystemExit("pyproject.toml is missing project name/version")
+    return name, version
 
 
 def sha256(path: Path) -> str:
@@ -63,6 +74,7 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, default=Path("release"))
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
+    project_name, project_version = project_metadata(root)
     out_dir = args.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -86,7 +98,7 @@ def main() -> int:
         {"name": artifact.name, "sha256": sha256(artifact), "bytes": artifact.stat().st_size}
         for artifact in copied_artifacts
     ]
-    manifest = {"project": "repo-pilot", "version": "1.1.0", "artifacts": records}
+    manifest = {"project": project_name, "version": project_version, "artifacts": records}
     (out_dir / "release-manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

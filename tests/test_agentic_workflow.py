@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from repopilot.config import Settings
 from repopilot.ingestion import RepositoryIngestor
-from repopilot.models import ModelResponse, TokenUsage, ToolCall
+from repopilot.models import ModelResponse, TokenUsage, ToolCall, TraceEvent
 from repopilot.providers.base import ModelRequest, ProviderHealth
 from repopilot.research_tools import RepositoryResearchTools
 from repopilot.retrieval import HybridRetriever, ScoredChunk
@@ -170,6 +171,82 @@ async def workflow_parts(
     await RepositoryIngestor(documents, settings).ingest_path()
     yield settings, documents, EvidenceStore(database), database
     await database.close()
+
+
+async def test_langgraph_topology_has_bounded_review_loop(
+    workflow_parts: tuple[Settings, DocumentStore, EvidenceStore, Database],
+) -> None:
+    settings, documents, evidence, _ = workflow_parts
+    workflow = ResearchWorkflow(PurposeProvider(), documents, evidence, settings)
+    graph = workflow.graph.get_graph()
+
+    assert set(graph.nodes) == {
+        "__start__",
+        "planner",
+        "researcher",
+        "reviewer",
+        "writer",
+        "__end__",
+    }
+    edges = {(edge.source, edge.target, edge.conditional) for edge in graph.edges}
+    assert ("planner", "researcher", False) in edges
+    assert ("researcher", "reviewer", False) in edges
+    assert ("reviewer", "researcher", True) in edges
+    assert ("reviewer", "writer", True) in edges
+    assert ("writer", "__end__", False) in edges
+
+
+async def test_langgraph_clean_path_emits_one_committed_event_per_node(
+    workflow_parts: tuple[Settings, DocumentStore, EvidenceStore, Database],
+) -> None:
+    settings, documents, evidence, _ = workflow_parts
+    completed_nodes: list[str] = []
+
+    async def capture(_step: int, _messages: list[dict[str, Any]], trace: list[TraceEvent]) -> None:
+        for event in trace:
+            metadata = getattr(event, "metadata", {})
+            if metadata.get("engine") == "langgraph":
+                completed_nodes.append(str(metadata["completed_node"]))
+
+    result = await ResearchWorkflow(PurposeProvider(), documents, evidence, settings).run(
+        "cache version stamp", on_step=capture
+    )
+
+    assert completed_nodes == ["planner", "researcher", "reviewer", "writer"]
+    assert result.degraded is False
+
+
+async def test_langgraph_reviewer_conditionally_routes_back_before_writer(
+    workflow_parts: tuple[Settings, DocumentStore, EvidenceStore, Database],
+) -> None:
+    settings, documents, evidence, _ = workflow_parts
+    bounded = settings.model_copy(update={"max_review_rounds": 1, "max_steps": 1})
+    completed_nodes: list[str] = []
+
+    async def capture(_step: int, _messages: list[dict[str, Any]], trace: list[TraceEvent]) -> None:
+        for event in trace:
+            metadata = getattr(event, "metadata", {})
+            if metadata.get("engine") == "langgraph":
+                completed_nodes.append(str(metadata["completed_node"]))
+
+    result = await ResearchWorkflow(RevisionProvider(), documents, evidence, bounded).run(
+        "cache version stamp", on_step=capture
+    )
+
+    assert completed_nodes == [
+        "planner",
+        "researcher",
+        "reviewer",
+        "researcher",
+        "reviewer",
+        "writer",
+    ]
+    assert result.degraded is True
+    assert any(
+        event.metadata.get("node") == "writer"
+        and "review_limit_reached" in event.metadata.get("degraded_reasons", [])
+        for event in result.trace
+    )
 
 
 async def test_model_plan_and_read_only_tool_drive_research(
@@ -380,6 +457,57 @@ async def test_resume_researches_again_when_checkpoint_chunks_drift(
     )
     assert result.degraded is True
     assert "corpus_drift" in writer_event.metadata["degraded_reasons"]
+
+
+async def test_writer_refuses_stale_evidence_when_corpus_drifts_after_review(
+    workflow_parts: tuple[Settings, DocumentStore, EvidenceStore, Database],
+) -> None:
+    settings, documents, evidence, _ = workflow_parts
+    provider = PurposeProvider()
+    changed = False
+
+    async def change_corpus_after_review(
+        _step: int, _messages: list[dict[str, Any]], trace: list[TraceEvent]
+    ) -> None:
+        nonlocal changed
+        if changed:
+            return
+        if any(
+            event.metadata.get("completed_node") == "reviewer"
+            and event.metadata.get("next_node") == "writer"
+            for event in trace
+        ):
+            (settings.resolved_workspace_root / "cache.md").write_text(
+                "# Cache\n\nA generation counter replaces the previous version stamp.\n",
+                encoding="utf-8",
+            )
+            await RepositoryIngestor(documents, settings).ingest_path()
+            changed = True
+
+    result = await ResearchWorkflow(provider, documents, evidence, settings).run(
+        "cache version stamp",
+        task_id="writer-corpus-drift",
+        on_step=change_corpus_after_review,
+    )
+
+    writer_event = next(
+        event
+        for event in result.trace
+        if event.event == "workflow" and event.metadata.get("node") == "writer"
+    )
+    assert changed is True
+    assert result.degraded is True
+    assert writer_event.metadata["accepted_evidence"] == 0
+    assert "corpus_drift" in writer_event.metadata["degraded_reasons"]
+    assert "cache.md:L" not in result.answer
+    assert "writer" not in [request.purpose for request in provider.requests]
+    assert await evidence.list_evidence("writer-corpus-drift") == []
+    assert any(
+        event.event == "guard"
+        and event.metadata.get("node") == "writer"
+        and event.metadata.get("reason") == "corpus_drift"
+        for event in result.trace
+    )
 
 
 async def test_unknown_injected_tool_fails_closed_without_losing_evidence(

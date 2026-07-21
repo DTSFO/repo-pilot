@@ -1,4 +1,4 @@
-# RepoPilot v1.1 Architecture
+# RepoPilot v1.2 Architecture
 
 ## System overview
 
@@ -7,7 +7,8 @@ Web UI (static, served at /)          MCP client (stdio)
   │ REST + SSE                          │ JSON-RPC
 FastAPI application  ◄──────────────  repopilot mcp
   ├── TaskService        events · WorkflowState checkpoints · resume · cancel
-  ├── ResearchWorkflow   bounded Planner → Researcher ⇄ Reviewer → Writer state machine
+  ├── LangGraph          compiled StateGraph · conditional revision edge · typed workflow state
+  ├── Role harnesses     model-driven tool loops · schema contracts · evidence-scoped prompts
   ├── ToolRegistry       schema-validated allowlist · read-only execution · observations
   ├── AsyncAgentRuntime  shared budgets · retries · concurrency · fallback provenance
   ├── HybridRetriever    BM25 × weak deterministic hashed-embedding bonus
@@ -18,11 +19,18 @@ FastAPI application  ◄──────────────  repopilot mc
   └── Storage            SQLite/SQLAlchemy async (PostgreSQL-ready URL switch)
 ```
 
-RepoPilot is a bounded multi-role Agent, not four independent autonomous Agents. Model calls make
+RepoPilot is a bounded multi-role Agent, not four independent autonomous processes. A real
+LangGraph `StateGraph` is the default control plane. Model calls make
 the decisions that benefit from language understanding; the Harness owns every permission,
 budget, state transition, citation rule, and fallback.
 
-## Workflow state machine
+LangGraph is used for durable, inspectable orchestration—not as a substitute for model agency.
+Nodes delimit responsibility and checkpoint boundaries. Inside a role, the model can inspect its
+observation and choose the next allowed action; the graph does not encode a branch for every tool
+choice. This split keeps evidence and termination rules deterministic while avoiding a brittle
+prompt pipeline disguised as an Agent.
+
+## Compiled StateGraph
 
 ```text
 Planner
@@ -45,6 +53,19 @@ Researcher ── candidate evidence ──► Reviewer
 initial review. The state machine always terminates because review rounds, model steps, tool calls,
 tokens, timeouts, and duplicate tool fingerprints are bounded by code.
 
+The graph has four named nodes and one conditional decision after Reviewer:
+
+- `planner → researcher → reviewer` is the initial path;
+- Reviewer routes to `researcher` only when it returns validated `additional_queries` and the
+  revision budget remains;
+- otherwise Reviewer routes to `writer`, which terminates the graph after citation validation.
+
+Why use LangGraph here instead of a plain `while` loop? RepoPilot now needs a first-class graph
+topology, named node boundaries, conditional revision, durable state hand-off, and a clear place to
+add future approval or parallel research branches. Why not model every action as a graph node? Tool
+selection is language-dependent and belongs in the role harness; forcing it into static routing
+would enlarge the graph without strengthening safety.
+
 ### Planner
 
 In live-provider mode the Planner requests a JSON plan containing retrieval queries,
@@ -64,6 +85,10 @@ The model may choose which registered tool to call within its budget. Unknown to
 arguments, timeouts, repeat fingerprints, and partial failures are recorded and mark the run
 degraded without discarding already collected valid evidence. Same-turn concurrency is allowed
 only when every selected tool is read-only.
+
+This is an inner agent loop: model response → validated tool calls → observations → next model
+response, until the model stops or a hard budget terminates the node. The outer StateGraph sees one
+Researcher node result, while trace events retain the internal tool trajectory.
 
 ### Reviewer
 
@@ -98,7 +123,7 @@ Each node writes a versioned WorkflowState snapshot containing at least:
 - current review round and token/tool budget counters;
 - `degraded` plus structured degradation reasons.
 
-On resume, ResearchWorkflow restores this state and continues from the recorded node/round instead
+On resume, the graph restores this state and continues from the recorded node/round instead
 of discarding the checkpoint and restarting the entire workflow. Candidate IDs are resolved against
 the latest corpus; missing IDs indicate corpus drift, which is disclosed as degradation and causes
 safe re-research. Evidence persistence replaces the task's final review snapshot transactionally,
@@ -106,7 +131,46 @@ so resume and review loops do not create duplicate rows.
 
 Duplicate tool fingerprints are scoped to one Researcher node execution and are not presented as an
 intra-node resumable log. Checkpoints are committed at node boundaries. This is node/round-level
-recovery, not byte-for-byte replay of an in-flight remote model request.
+recovery, not replay of an in-flight HTTP/model request. If interruption happens before a node
+boundary commits, that node's bounded idempotent work may run again; external side effects would
+require operation IDs and a durable effect log before they could be advertised as exactly-once.
+
+SQLAlchemy `TaskStore` is the single durable source of truth for tasks, events, and versioned
+WorkflowState checkpoints. LangGraph owns graph execution and routing, but RepoPilot deliberately
+does not attach a second LangGraph checkpoint saver. Two persistence authorities would create
+dual-write ordering, reconciliation, and ambiguous-resume problems; keeping one store also lets the
+REST API, SSE, MCP, evaluation, cancel, and resume paths observe the same committed state.
+
+## Event streaming semantics
+
+Task events are appended to SQLite with monotonically ordered IDs. The SSE endpoint first queries
+events newer than `Last-Event-ID`, then continues by short-polling the same table until terminal
+state or disconnect. This gives reconnect replay for committed events on a single persisted
+database. It is not push-based pub/sub, does not preserve an in-memory socket across restart, and
+does not by itself provide cross-replica fan-out.
+
+## Interview-grade trade-offs
+
+- **Why LangGraph?** Named durable nodes and a conditional review loop are now product concepts,
+  not incidental control flow. The dependency earns its place through inspectability and extension
+  points, while repository/provider/storage interfaces remain framework-independent.
+- **Why four roles?** They separate prompt context and authority: only Researcher gets repository
+  tools, Reviewer cannot promote hard-rejected evidence, and Writer cannot retrieve new facts.
+- **Why deterministic gates around an LLM?** Source freshness, citation resolution, permissions,
+  budgets, and termination are invariants. Letting a model waive them would make recovery and
+  evaluation non-reproducible.
+- **Why SQLite polling SSE?** It is small, durable, testable, and adequate for a single self-hosted
+  instance. Redis Streams/Kafka/PostgreSQL LISTEN-NOTIFY become justified with multiple workers or
+  latency/fan-out SLOs.
+- **Why deterministic baseline?** It isolates workflow/retrieval regressions from model drift. Live
+  Provider experiments answer a different question and must record endpoint, model and config.
+- **What is not exactly-once?** In-flight Provider calls. Checkpoints describe committed state at
+  node boundaries; they do not serialize remote execution or guarantee byte-identical replay.
+- **Why does Writer refuse on a last-moment corpus drift instead of looping back?** Recovery preflight
+  and Reviewer normally re-retrieve changed chunks. A change after Reviewer commits is a narrower
+  race: Writer clears the stale evidence snapshot, marks `corpus_drift`, and refuses without calling
+  the model. Adding a Writer → Researcher edge would expand the advertised topology and can lose
+  liveness under continuous ingestion unless a second retry budget is introduced.
 
 ## Provider and degraded semantics
 
@@ -143,7 +207,7 @@ embedding. Model-based review does not change that retrieval claim.
 src/repopilot/
   api.py             FastAPI app: REST, SSE, upload, metrics, static UI
   cli.py             serve / ingest / eval / mcp subcommands
-  workflow.py        bounded multi-role ResearchWorkflow and WorkflowState
+  workflow.py        LangGraph StateGraph, role nodes, routing and WorkflowState
   research_tools.py  schema-validated read-only repository tool registry
   runtime.py         reusable model/tool loop, budgets, retries, fallback provenance
   tools.py           ToolSpec and fail-closed ToolRegistry

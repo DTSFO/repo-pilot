@@ -4,8 +4,13 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import asdict, dataclass
+from typing import Any, Literal, TypedDict, cast
+from uuid import uuid4
+
+from langchain_core.runnables import RunnableConfig
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from .config import Settings
 from .errors import RepoPilotError
@@ -47,7 +52,7 @@ STOP_TOKENS = frozenset(
 )
 MAX_QUERIES = 5
 MAX_RECALLED_MEMORIES = 2
-TOP_K_PER_QUERY = 4
+TOP_K_PER_QUERY = 5
 REVIEW_RELATIVE_THRESHOLD = 0.35
 REVIEW_MIN_COVERAGE = 0.3
 QUOTE_MAX_CHARS = 280
@@ -77,8 +82,41 @@ class ReviewDecision:
     additional_queries: tuple[str, ...] = ()
 
 
+GraphNode = Literal["planner", "researcher", "reviewer", "writer", "end"]
+
+
+class WorkflowState(TypedDict, total=False):
+    schema_version: int
+    goal: str
+    task_id: str | None
+    next_node: GraphNode
+    messages: list[dict[str, Any]]
+    queries: list[str]
+    subquestions: list[str]
+    completion_criteria: list[str]
+    pending_queries: list[str]
+    candidates: list[dict[str, Any]]
+    reviewed: list[dict[str, Any]]
+    review_round: int
+    total_tokens: int
+    tool_call_count: int
+    degraded: bool
+    degraded_reasons: list[str]
+    trace: list[dict[str, Any]]
+    node_events: list[dict[str, Any]]
+    step: int
+    final_report: str
+    status: Literal["completed", "guarded", "failed", "cancelled"]
+
+
 class ResearchWorkflow:
-    """Bounded Planner → Researcher ↔ Reviewer → Writer research state machine."""
+    """LangGraph-orchestrated Planner → Researcher ↔ Reviewer → Writer workflow.
+
+    LangGraph owns the executable topology and conditional routing. RepoPilot's
+    SQLAlchemy TaskStore remains the single durable recovery source so task
+    events, user-visible checkpoints, evidence snapshots, and SSE replay do not
+    diverge across two independently committed checkpoint databases.
+    """
 
     def __init__(
         self,
@@ -93,6 +131,36 @@ class ResearchWorkflow:
         self.evidence = evidence
         self.settings = settings
         self.memory = memory
+        self.graph = self._build_graph()
+
+    def _build_graph(
+        self,
+    ) -> CompiledStateGraph[WorkflowState, None, WorkflowState, WorkflowState]:
+        builder = StateGraph(WorkflowState)
+        builder.add_node("planner", self._planner_node)
+        builder.add_node("researcher", self._researcher_node)
+        builder.add_node("reviewer", self._reviewer_node)
+        builder.add_node("writer", self._writer_node)
+        builder.add_conditional_edges(
+            START,
+            self._route_start,
+            {
+                "planner": "planner",
+                "researcher": "researcher",
+                "reviewer": "reviewer",
+                "writer": "writer",
+                "end": END,
+            },
+        )
+        builder.add_edge("planner", "researcher")
+        builder.add_edge("researcher", "reviewer")
+        builder.add_conditional_edges(
+            "reviewer",
+            self._route_after_review,
+            {"researcher": "researcher", "writer": "writer"},
+        )
+        builder.add_edge("writer", END)
+        return builder.compile(name="repopilot-research-workflow")
 
     async def run(
         self,
@@ -105,162 +173,375 @@ class ResearchWorkflow:
         messages = [
             dict(item) for item in (initial_messages or [{"role": "user", "content": goal}])
         ]
-        state = self._restore_state(messages, goal)
-        trace: list[TraceEvent] = []
-        total_tokens = int(state.get("total_tokens", 0))
-        degraded = bool(state.get("degraded", False))
-        reasons = set(str(item) for item in state.get("degraded_reasons", []))
-        step = 0
+        state = await self._prepare_state(goal, messages, task_id)
+        recursion_limit = max(25, 2 * self.settings.max_review_rounds + 8)
+        config: RunnableConfig = {
+            "recursion_limit": recursion_limit,
+            "tags": [f"task:{task_id or uuid4()}"],
+        }
+        async for update in self.graph.astream(state, config=config, stream_mode="updates"):
+            if not isinstance(update, dict):
+                continue
+            for payload in update.values():
+                if not isinstance(payload, dict):
+                    continue
+                state = cast(WorkflowState, {**state, **payload})
+                if on_step is not None:
+                    events = self._deserialize_trace(payload.get("node_events", []))
+                    if events:
+                        await on_step(
+                            int(state.get("step", 0)),
+                            [dict(item) for item in state.get("messages", [])],
+                            events,
+                        )
+        return self._result_from_state(state)
 
-        async def checkpoint(node: str, **updates: Any) -> None:
-            nonlocal step
-            step += 1
-            state.update(updates)
-            state.update(
-                {
-                    "schema_version": STATE_VERSION,
-                    "goal": goal,
-                    "next_node": node,
-                    "total_tokens": total_tokens,
-                    "degraded": degraded,
-                    "degraded_reasons": sorted(reasons),
-                }
-            )
-            messages.append(
-                {
-                    "role": "system",
-                    "content": "RepoPilot workflow checkpoint",
-                    "_repopilot_state": dict(state),
-                }
-            )
-            trace.append(
-                TraceEvent(
-                    step,
-                    "checkpoint",
-                    f"Checkpoint saved for {node}",
-                    {"node": node, "review_round": state.get("review_round", 0)},
-                )
-            )
-            if on_step is not None:
-                await on_step(step, [dict(item) for item in messages], [trace[-1]])
-
+    async def _prepare_state(
+        self, goal: str, messages: list[dict[str, Any]], task_id: str | None
+    ) -> WorkflowState:
+        restored = self._restore_state(messages, goal)
+        state: WorkflowState = {
+            "schema_version": STATE_VERSION,
+            "goal": goal,
+            "task_id": task_id,
+            "next_node": self._graph_node(restored.get("next_node")),
+            "messages": messages,
+            "queries": [str(item) for item in restored.get("queries", [goal])],
+            "subquestions": [str(item) for item in restored.get("subquestions", [])],
+            "completion_criteria": [str(item) for item in restored.get("completion_criteria", [])],
+            "pending_queries": [str(item) for item in restored.get("pending_queries", [])],
+            "candidates": list(restored.get("candidates", [])),
+            "reviewed": list(restored.get("reviewed", [])),
+            "review_round": int(restored.get("review_round", 0)),
+            "total_tokens": int(restored.get("total_tokens", 0)),
+            "tool_call_count": int(restored.get("tool_call_count", 0)),
+            "degraded": bool(restored.get("degraded", False)),
+            "degraded_reasons": [str(item) for item in restored.get("degraded_reasons", [])],
+            "trace": [],
+            "node_events": [],
+            "step": int(restored.get("step", 0)),
+        }
+        if "final_report" in restored:
+            state["final_report"] = str(restored["final_report"])
+        if restored.get("status") == "completed":
+            state["status"] = "completed"
         rows = await self.documents.latest_chunk_rows()
-        retriever = HybridRetriever(rows)
-        tools = RepositoryResearchTools(retriever)
         row_map = {row.chunk_id: row for row in rows}
-        serialized_candidates = state.get("candidates", [])
-        candidates = self._deserialize_candidates(serialized_candidates, row_map)
-        tools.seed(candidates)
-        next_node = str(state.get("next_node", "planner"))
-        if (
-            next_node in {"reviewer", "writer"}
-            and isinstance(serialized_candidates, list)
-            and len(candidates) < len(serialized_candidates)
-        ):
-            degraded = True
+        serialized = state.get("candidates", [])
+        candidates = self._deserialize_candidates(serialized, row_map)
+        if state["next_node"] in {"reviewer", "writer"} and len(candidates) < len(serialized):
+            reasons = set(state["degraded_reasons"])
             reasons.add("corpus_drift")
             state["next_node"] = "researcher"
             state["pending_queries"] = list(state.get("queries", [goal]))
             state["reviewed"] = []
-            next_node = "researcher"
+            state["degraded"] = True
+            state["degraded_reasons"] = sorted(reasons)
+        return state
 
-        if next_node == "planner":
-            plan, used_tokens, plan_degraded = await self._plan(goal, trace)
-            total_tokens += used_tokens
-            if plan_degraded:
-                degraded = True
-                reasons.add("planner_fallback")
-            recalled = await self._recall(goal, trace)
-            queries = list(dict.fromkeys((*plan.queries, *recalled)))[
-                : MAX_QUERIES + MAX_RECALLED_MEMORIES
-            ]
-            state["queries"] = queries
-            state["review_round"] = 0
-            await checkpoint("researcher", queries=queries)
-        else:
-            queries = [str(item) for item in state.get("queries", [goal])]
+    @staticmethod
+    def _route_start(state: WorkflowState) -> GraphNode:
+        return ResearchWorkflow._graph_node(state.get("next_node"))
 
-        review_round = int(state.get("review_round", 0))
-        reviewed = self._deserialize_reviewed(state.get("reviewed", []), candidates)
-        while str(state.get("next_node")) != "writer":
-            if str(state.get("next_node")) == "researcher":
-                pending = [str(item) for item in state.get("pending_queries", queries)]
-                research_tokens, research_calls, research_degraded = await self._research(
-                    goal, pending, tools, trace
+    @staticmethod
+    def _route_after_review(state: WorkflowState) -> Literal["researcher", "writer"]:
+        return "researcher" if state.get("next_node") == "researcher" else "writer"
+
+    async def _planner_node(self, state: WorkflowState) -> dict[str, Any]:
+        trace: list[TraceEvent] = []
+        goal = state["goal"]
+        plan, used_tokens, plan_degraded = await self._plan(goal, trace)
+        recalled = await self._recall(goal, trace)
+        queries = list(dict.fromkeys((*plan.queries, *recalled)))[
+            : MAX_QUERIES + MAX_RECALLED_MEMORIES
+        ]
+        reasons = set(state.get("degraded_reasons", []))
+        if plan_degraded:
+            reasons.add("planner_fallback")
+        return self._complete_node(
+            state,
+            completed_node="planner",
+            next_node="researcher",
+            raw_events=trace,
+            updates={
+                "queries": queries,
+                "subquestions": list(plan.subquestions),
+                "completion_criteria": list(plan.completion_criteria),
+                "pending_queries": queries,
+                "review_round": 0,
+                "total_tokens": int(state.get("total_tokens", 0)) + used_tokens,
+                "degraded": bool(state.get("degraded", False)) or plan_degraded,
+                "degraded_reasons": sorted(reasons),
+            },
+        )
+
+    async def _researcher_node(self, state: WorkflowState) -> dict[str, Any]:
+        trace: list[TraceEvent] = []
+        rows = await self.documents.latest_chunk_rows()
+        tools = RepositoryResearchTools(HybridRetriever(rows))
+        row_map = {row.chunk_id: row for row in rows}
+        tools.seed(self._deserialize_candidates(state.get("candidates", []), row_map))
+        queries = [
+            str(item)
+            for item in (state.get("pending_queries") or state.get("queries") or [state["goal"]])
+        ]
+        used_tokens, tool_calls, research_degraded = await self._research(
+            state["goal"], queries, tools, trace
+        )
+        reasons = set(state.get("degraded_reasons", []))
+        if research_degraded:
+            reasons.add("researcher_degraded")
+        return self._complete_node(
+            state,
+            completed_node="researcher",
+            next_node="reviewer",
+            raw_events=trace,
+            updates={
+                "candidates": self._serialize_candidates(tools.hits),
+                "pending_queries": [],
+                "total_tokens": int(state.get("total_tokens", 0)) + used_tokens,
+                "tool_call_count": int(state.get("tool_call_count", 0)) + tool_calls,
+                "degraded": bool(state.get("degraded", False)) or research_degraded,
+                "degraded_reasons": sorted(reasons),
+            },
+        )
+
+    async def _reviewer_node(self, state: WorkflowState) -> dict[str, Any]:
+        trace: list[TraceEvent] = []
+        rows = await self.documents.latest_chunk_rows()
+        row_map = {row.chunk_id: row for row in rows}
+        serialized = state.get("candidates", [])
+        candidates = self._deserialize_candidates(serialized, row_map)
+        reasons = set(state.get("degraded_reasons", []))
+        if len(candidates) < len(serialized):
+            reasons.add("corpus_drift")
+            trace.append(
+                TraceEvent(
+                    0,
+                    "guard",
+                    "Corpus changed before review; returning to Researcher",
+                    {"node": "reviewer", "reason": "corpus_drift"},
                 )
-                total_tokens += research_tokens
-                state["tool_call_count"] = int(state.get("tool_call_count", 0)) + research_calls
-                if research_degraded:
-                    degraded = True
-                    reasons.add("researcher_degraded")
-                candidates = tools.hits
-                await checkpoint(
-                    "reviewer",
-                    candidates=self._serialize_candidates(candidates),
-                    pending_queries=[],
-                )
-
-            decision, review_tokens, review_degraded = await self._review(
-                goal, candidates, row_map, trace
             )
-            total_tokens += review_tokens
-            if review_degraded:
-                degraded = True
-                reasons.add("reviewer_fallback")
-            reviewed = list(decision.reviewed)
-            await self._persist_evidence(goal, reviewed, task_id)
-            if (
-                decision.needs_revision
-                and decision.additional_queries
-                and review_round < self.settings.max_review_rounds
-            ):
-                review_round += 1
-                state["review_round"] = review_round
-                await checkpoint(
-                    "researcher",
-                    reviewed=self._serialize_reviewed(reviewed),
-                    pending_queries=list(decision.additional_queries),
-                    review_round=review_round,
-                )
-                continue
-            if decision.needs_revision and review_round >= self.settings.max_review_rounds:
-                degraded = True
-                reasons.add("review_limit_reached")
-            await checkpoint(
-                "writer", reviewed=self._serialize_reviewed(reviewed), review_round=review_round
-            )
-            break
-
-        accepted = [item.scored for item in reviewed if item.accepted]
-        narrative, writer_tokens, writer_degraded = await self._narrative(goal, accepted)
-        total_tokens += writer_tokens
-        if writer_degraded:
-            degraded = True
-            reasons.add("writer_validation_failed")
-        if not rows:
-            degraded = True
-            reasons.add("empty_index")
-        report = self._compose_report(goal, accepted, narrative, index_size=len(retriever))
-        await self._remember(goal, accepted, task_id)
-        messages.append({"role": "assistant", "content": report})
-        trace.append(
-            TraceEvent(
-                step + 1,
-                "workflow",
-                "Writer composed the report",
-                {
-                    "node": "writer",
-                    "accepted_evidence": len(accepted),
-                    "degraded": degraded,
+            return self._complete_node(
+                state,
+                completed_node="reviewer",
+                next_node="researcher",
+                raw_events=trace,
+                updates={
+                    "pending_queries": list(state.get("queries", [state["goal"]])),
+                    "reviewed": [],
+                    "degraded": True,
                     "degraded_reasons": sorted(reasons),
                 },
             )
+        decision, used_tokens, review_degraded = await self._review(
+            state["goal"], candidates, row_map, trace
         )
-        trace.append(TraceEvent(step + 1, "finish", "Final report returned"))
-        if on_step is not None:
-            await on_step(step + 1, [dict(item) for item in messages], trace[-2:])
+        reviewed = list(decision.reviewed)
+        await self._persist_evidence(state["goal"], reviewed, state.get("task_id"))
+        if review_degraded:
+            reasons.add("reviewer_fallback")
+        review_round = int(state.get("review_round", 0))
+        next_node: GraphNode = "writer"
+        pending: list[str] = []
+        if (
+            decision.needs_revision
+            and decision.additional_queries
+            and review_round < self.settings.max_review_rounds
+        ):
+            review_round += 1
+            next_node = "researcher"
+            pending = list(decision.additional_queries)
+        elif decision.needs_revision and review_round >= self.settings.max_review_rounds:
+            reasons.add("review_limit_reached")
+        degraded = bool(state.get("degraded", False)) or review_degraded
+        degraded = degraded or "review_limit_reached" in reasons
+        return self._complete_node(
+            state,
+            completed_node="reviewer",
+            next_node=next_node,
+            raw_events=trace,
+            updates={
+                "reviewed": self._serialize_reviewed(reviewed),
+                "pending_queries": pending,
+                "review_round": review_round,
+                "total_tokens": int(state.get("total_tokens", 0)) + used_tokens,
+                "degraded": degraded,
+                "degraded_reasons": sorted(reasons),
+            },
+        )
+
+    async def _writer_node(self, state: WorkflowState) -> dict[str, Any]:
+        trace: list[TraceEvent] = []
+        rows = await self.documents.latest_chunk_rows()
+        retriever = HybridRetriever(rows)
+        row_map = {row.chunk_id: row for row in rows}
+        serialized = state.get("candidates", [])
+        candidates = self._deserialize_candidates(serialized, row_map)
+        reasons = set(state.get("degraded_reasons", []))
+        if len(candidates) < len(serialized):
+            reasons.add("corpus_drift")
+            trace.append(
+                TraceEvent(
+                    0,
+                    "guard",
+                    "Corpus changed before writing; refusing stale reviewed evidence",
+                    {
+                        "node": "writer",
+                        "reason": "corpus_drift",
+                        "missing_candidates": len(serialized) - len(candidates),
+                    },
+                )
+            )
+            accepted: list[ScoredChunk] = []
+            narrative = None
+            used_tokens = 0
+            writer_degraded = False
+            await self._persist_evidence(state["goal"], [], state.get("task_id"))
+        else:
+            reviewed = self._deserialize_reviewed(state.get("reviewed", []), candidates)
+            accepted = [item.scored for item in reviewed if item.accepted]
+            narrative, used_tokens, writer_degraded = await self._narrative(state["goal"], accepted)
+        if writer_degraded:
+            reasons.add("writer_validation_failed")
+        if not rows:
+            reasons.add("empty_index")
+        degraded = bool(state.get("degraded", False)) or bool(reasons)
+        report = self._compose_report(state["goal"], accepted, narrative, index_size=len(retriever))
+        await self._remember(state["goal"], accepted, state.get("task_id"))
+        trace.extend(
+            [
+                TraceEvent(
+                    0,
+                    "workflow",
+                    "Writer composed the report",
+                    {
+                        "node": "writer",
+                        "accepted_evidence": len(accepted),
+                        "degraded": degraded,
+                        "degraded_reasons": sorted(reasons),
+                    },
+                ),
+                TraceEvent(0, "finish", "Final report returned", {"node": "writer"}),
+            ]
+        )
+        return self._complete_node(
+            state,
+            completed_node="writer",
+            next_node="end",
+            raw_events=trace,
+            updates={
+                "total_tokens": int(state.get("total_tokens", 0)) + used_tokens,
+                "degraded": degraded,
+                "degraded_reasons": sorted(reasons),
+                "final_report": report,
+                "status": "completed",
+            },
+            assistant_message=report,
+        )
+
+    def _complete_node(
+        self,
+        state: WorkflowState,
+        *,
+        completed_node: Literal["planner", "researcher", "reviewer", "writer"],
+        next_node: GraphNode,
+        raw_events: list[TraceEvent],
+        updates: dict[str, Any],
+        assistant_message: str | None = None,
+    ) -> dict[str, Any]:
+        step = int(state.get("step", 0)) + 1
+        merged: dict[str, Any] = dict(state)
+        merged.update(updates)
+        merged.update(
+            schema_version=STATE_VERSION,
+            next_node=next_node,
+            step=step,
+        )
+        checkpoint_node = completed_node if next_node == "end" else next_node
+        events = [
+            TraceEvent(step, event.event, event.detail, dict(event.metadata))
+            for event in raw_events
+        ]
+        events.append(
+            TraceEvent(
+                step,
+                "checkpoint",
+                f"LangGraph node {completed_node} committed; next node is {next_node}",
+                {
+                    "node": checkpoint_node,
+                    "completed_node": completed_node,
+                    "next_node": next_node,
+                    "engine": "langgraph",
+                    "review_round": merged.get("review_round", 0),
+                },
+            )
+        )
+        trace = [*state.get("trace", []), *(asdict(event) for event in events)]
+        checkpoint_state = self._checkpoint_payload(merged)
+        messages = [
+            *state.get("messages", []),
+            {
+                "role": "system",
+                "content": "RepoPilot LangGraph workflow checkpoint",
+                "_repopilot_state": checkpoint_state,
+            },
+        ]
+        if assistant_message is not None:
+            messages.append({"role": "assistant", "content": assistant_message})
+        return {
+            **updates,
+            "schema_version": STATE_VERSION,
+            "next_node": next_node,
+            "step": step,
+            "messages": messages,
+            "trace": trace,
+            "node_events": [asdict(event) for event in events],
+        }
+
+    @staticmethod
+    def _checkpoint_payload(state: dict[str, Any]) -> dict[str, Any]:
+        excluded = {"messages", "trace", "node_events"}
+        return {key: value for key, value in state.items() if key not in excluded}
+
+    @staticmethod
+    def _graph_node(value: Any) -> GraphNode:
+        return (
+            value if value in {"planner", "researcher", "reviewer", "writer", "end"} else "planner"
+        )
+
+    @staticmethod
+    def _deserialize_trace(items: Any) -> list[TraceEvent]:
+        if not isinstance(items, list):
+            return []
+        events: list[TraceEvent] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            events.append(
+                TraceEvent(
+                    int(item.get("step", 0)),
+                    item.get("event", "workflow"),
+                    str(item.get("detail", "")),
+                    dict(item.get("metadata") or {}),
+                )
+            )
+        return events
+
+    def _result_from_state(self, state: WorkflowState) -> AgentRunResult:
+        report = str(state.get("final_report", ""))
+        if not report:
+            report = self._compose_report(state["goal"], [], None, index_size=0)
+        status = state.get("status", "completed")
         return AgentRunResult(
-            report, tuple(messages), tuple(trace), step + 1, "completed", total_tokens, degraded
+            report,
+            tuple(dict(item) for item in state.get("messages", [])),
+            tuple(self._deserialize_trace(state.get("trace", []))),
+            int(state.get("step", 0)),
+            status,
+            int(state.get("total_tokens", 0)),
+            bool(state.get("degraded", False)),
         )
 
     async def _plan(self, goal: str, trace: list[TraceEvent]) -> tuple[ResearchPlan, int, bool]:

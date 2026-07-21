@@ -47,6 +47,15 @@ def test_dataset_requires_unambiguous_case_labels(tmp_path: Path, case: dict[str
         load_dataset(path)
 
 
+def test_source_labels_do_not_match_test_filename_substrings() -> None:
+    match = EvaluationRunner._source_matches
+
+    assert match("src/repopilot/runtime.py", "src/repopilot/runtime.py") is True
+    assert match("tests/test_runtime.py", "src/repopilot/runtime.py") is False
+    assert match("src/repopilot/storage/models.py", "src/repopilot/storage/") is True
+    assert match("tests/test_storage.py", "src/repopilot/storage/") is False
+
+
 async def test_eval_runner_on_small_corpus(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -97,6 +106,8 @@ async def test_eval_runner_on_small_corpus(tmp_path: Path) -> None:
     }
     assert result["dataset_metadata"]["path"] == str(dataset)
     assert len(result["dataset_metadata"]["fingerprint"]) == 64
+    assert result["run_config"]["orchestrator"] == "langgraph"
+    assert result["run_config"]["graph_name"] == "repopilot-research-workflow"
     assert result["run_config"]["recall_k"] == 5
     assert result["corpus"]["documents"] == 1
     assert len(result["corpus"]["fingerprint"]) == 64
@@ -104,6 +115,7 @@ async def test_eval_runner_on_small_corpus(tmp_path: Path) -> None:
     assert metrics["recall_at_5"] == 1.0
     assert metrics["refusal_accuracy"] == 1.0
     assert metrics["task_success_rate"] == 1.0
+    assert result["cases"][0]["top_sources"] == ("auth.py",)
     assert metrics["degraded_cases"] == 0
     assert metrics["fallback_responses"] == 0
     assert metrics["revision_requested_cases"] == 0
