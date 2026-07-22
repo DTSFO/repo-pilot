@@ -207,5 +207,6 @@ jobs:
             test ! -w /app &&
             test -w /app/data &&
             test ! -w /workspace &&
+            git --version >/dev/null &&
             repopilot --help >/dev/null
           '

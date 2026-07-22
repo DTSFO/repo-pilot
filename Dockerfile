@@ -7,6 +7,9 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 
 FROM python:3.12-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --uid 10001 repopilot
 WORKDIR /app
 COPY --from=builder --chown=root:root /app /app
