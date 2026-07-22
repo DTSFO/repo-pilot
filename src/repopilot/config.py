@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -45,6 +46,8 @@ class Settings(BaseSettings):
     allowed_repository_roots: str = ""
     repository_sync_timeout_seconds: float = Field(default=120.0, gt=0, le=1800)
     api_token: SecretStr | None = None
+    daily_task_limit: int = Field(default=0, ge=0, le=1000)
+    daily_quota_timezone: str = "UTC"
     max_steps: int = Field(default=12, ge=1, le=100)
     max_tool_calls: int = Field(default=40, ge=1, le=1000)
     max_total_tokens: int = Field(default=100_000, ge=1, le=10_000_000)
@@ -66,6 +69,10 @@ class Settings(BaseSettings):
             raise ValueError("openai_compatible requires LLM_BASE_URL, LLM_MODEL, and LLM_API_KEY")
         if self.llm_retry_max_seconds < self.llm_retry_base_seconds:
             raise ValueError("LLM_RETRY_MAX_SECONDS must be >= LLM_RETRY_BASE_SECONDS")
+        try:
+            ZoneInfo(self.daily_quota_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("DAILY_QUOTA_TIMEZONE must be a valid IANA timezone") from exc
         return self
 
     @property

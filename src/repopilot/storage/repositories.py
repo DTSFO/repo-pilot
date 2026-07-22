@@ -10,11 +10,13 @@ from uuid import uuid4
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
+from ..errors import DailyQuotaExceededError
 from .database import Database
 from .models import (
     LEGACY_REPOSITORY_ID,
     CheckpointRecord,
     ChunkRecord,
+    DailyUsageRecord,
     EvidenceRecord,
     MemoryItemRecord,
     RepositoryRecord,
@@ -184,6 +186,48 @@ class TaskStore:
                 .limit(1)
             )
             return result.first()
+
+
+class DailyQuotaStore:
+    """Persistent per-client daily task quota with atomic database updates."""
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+    async def consume(self, client_hash: str, usage_date: str, limit: int) -> int | None:
+        if limit <= 0:
+            return None
+        key = (client_hash, usage_date)
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            for attempt in range(3):
+                try:
+                    async with self.database.session() as session:
+                        record = await session.get(
+                            DailyUsageRecord,
+                            {"client_hash": client_hash, "usage_date": usage_date},
+                        )
+                        if record is None:
+                            session.add(
+                                DailyUsageRecord(
+                                    client_hash=client_hash,
+                                    usage_date=usage_date,
+                                    task_count=1,
+                                )
+                            )
+                            await session.flush()
+                            return limit - 1
+                        if record.task_count >= limit:
+                            raise DailyQuotaExceededError(retry_after_seconds=0)
+                        record.task_count += 1
+                        await session.flush()
+                        return limit - record.task_count
+                except IntegrityError:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(0)
+        raise RuntimeError("daily quota allocation exhausted")
 
 
 class RepositoryStore:

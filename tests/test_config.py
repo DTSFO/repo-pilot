@@ -46,6 +46,12 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings.resolved_llm_pool_timeout_seconds, 10.0)
         self.assertEqual(settings.sse_poll_seconds, 0.2)
         self.assertEqual(settings.sse_heartbeat_seconds, 15.0)
+        self.assertEqual(settings.daily_task_limit, 0)
+        self.assertEqual(settings.daily_quota_timezone, "UTC")
+
+    def test_daily_quota_timezone_must_be_valid(self) -> None:
+        with self.assertRaises(ValidationError):
+            Settings(_env_file=None, daily_quota_timezone="Not/A_Timezone")
 
     def test_legacy_aggregate_timeout_and_granular_override_are_supported(self) -> None:
         settings = Settings(

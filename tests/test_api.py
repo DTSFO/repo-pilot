@@ -69,6 +69,30 @@ async def test_create_task_completes_offline(client: httpx.AsyncClient) -> None:
     assert "final_report" not in summary
 
 
+async def test_daily_task_quota_is_persistent_and_returns_retry_after(tmp_path: Path) -> None:
+    app = create_app(make_settings(tmp_path, daily_task_limit=2, daily_quota_timezone="UTC"))
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            first = await http.post("/api/tasks", json={"goal": "quota one"})
+            second = await http.post("/api/tasks", json={"goal": "quota two"})
+            blocked = await http.post("/api/tasks", json={"goal": "quota three"})
+            assert first.status_code == 202
+            assert second.status_code == 202
+            assert blocked.status_code == 429
+            assert blocked.json()["error"]["code"] == "daily_task_limit_exceeded"
+            assert int(blocked.headers["retry-after"]) > 0
+
+    app2 = create_app(make_settings(tmp_path, daily_task_limit=2, daily_quota_timezone="UTC"))
+    async with LifespanManager(app2):
+        transport = httpx.ASGITransport(app=app2)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            blocked_after_restart = await http.post(
+                "/api/tasks", json={"goal": "quota after restart"}
+            )
+            assert blocked_after_restart.status_code == 429
+
+
 async def test_events_are_persisted_in_order(client: httpx.AsyncClient) -> None:
     task_id = (await client.post("/api/tasks", json={"goal": "hello"})).json()["id"]
     await wait_terminal(client, task_id)

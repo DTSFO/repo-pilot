@@ -4,11 +4,13 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
+from hashlib import sha256
 from http import HTTPStatus
 from pathlib import Path
 from time import perf_counter
 from typing import Annotated, Any, cast
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, File, Header, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
@@ -16,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import Settings, get_settings
-from .errors import RepoPilotError
+from .errors import DailyQuotaExceededError, RepoPilotError
 from .ingestion import DocumentTooLargeError, RepositoryIngestor
 from .observability import HTTP_REQUESTS, REQUEST_LATENCY, configure_logging, metrics_payload
 from .providers.factory import build_provider
@@ -38,6 +40,7 @@ from .storage.models import (
     TaskEventRecord,
 )
 from .storage.repositories import (
+    DailyQuotaStore,
     DocumentStore,
     EvidenceStore,
     MemoryStore,
@@ -45,6 +48,24 @@ from .storage.repositories import (
     TaskStore,
 )
 from .workflow import ResearchWorkflow
+
+
+def _client_quota_key(request: Request) -> str:
+    """Hash the proxy-provided client address; never persist the raw address."""
+
+    identity = (
+        request.headers.get("cf-connecting-ip")
+        or request.headers.get("x-real-ip")
+        or (request.client.host if request.client else "unknown")
+    )
+    identity = identity.split(",", 1)[0].strip() or "unknown"
+    return sha256(f"repopilot-demo:{identity}".encode()).hexdigest()
+
+
+def _quota_date_and_retry(timezone_name: str) -> tuple[str, int]:
+    now = datetime.now(ZoneInfo(timezone_name))
+    next_day = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return now.date().isoformat(), max(1, int((next_day - now).total_seconds()))
 
 
 class AuthenticationError(RepoPilotError):
@@ -277,10 +298,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         memory = MemoryStore(database)
         workflow = ResearchWorkflow(provider, documents, evidence, app_settings, memory=memory)
         service = TaskService(TaskStore(database), workflow)
+        daily_quota = DailyQuotaStore(database)
         repository_manager = RepositoryManager(database, app_settings)
         app.state.database = database
         app.state.provider = provider
         app.state.service = service
+        app.state.daily_quota = daily_quota
         app.state.documents = documents
         app.state.evidence = evidence
         app.state.ingestor = RepositoryIngestor(documents, app_settings)
@@ -437,9 +460,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(RepoPilotError)
     async def repopilot_error_handler(request: Request, exc: RepoPilotError) -> JSONResponse:
+        headers = {}
+        if isinstance(exc, DailyQuotaExceededError):
+            headers["Retry-After"] = str(exc.retry_after_seconds)
         return JSONResponse(
             status_code=int(exc.http_status),
             content={"error": {"code": exc.code, "message": exc.safe_message}},
+            headers=headers,
         )
 
     @app.get("/metrics")
@@ -474,6 +501,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> TaskResponse:
         repository = await resolve_repository(request, payload.repository_id)
         revision = await resolve_indexed_revision(request, repository)
+        quota: DailyQuotaStore = request.app.state.daily_quota
+        quota_key = _client_quota_key(request)
+        quota_date, retry_after = _quota_date_and_retry(app_settings.daily_quota_timezone)
+        try:
+            await quota.consume(quota_key, quota_date, app_settings.daily_task_limit)
+        except DailyQuotaExceededError as exc:
+            exc.retry_after_seconds = retry_after
+            raise
         record = await service.create_task(
             payload.goal,
             repository_id=repository.id,

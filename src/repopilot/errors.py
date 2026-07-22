@@ -17,6 +17,16 @@ class RepoPilotError(Exception):
         self.details = details or {}
 
 
+class DailyQuotaExceededError(RepoPilotError):
+    code = "daily_task_limit_exceeded"
+    safe_message = "The daily research-task limit has been reached. Please try again tomorrow."
+    http_status = HTTPStatus.TOO_MANY_REQUESTS
+
+    def __init__(self, *, retry_after_seconds: int) -> None:
+        super().__init__(details={"retry_after_seconds": retry_after_seconds})
+        self.retry_after_seconds = retry_after_seconds
+
+
 class ConfigurationError(RepoPilotError):
     code = "configuration_error"
     safe_message = "RepoPilot is not configured for this operation."

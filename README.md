@@ -98,6 +98,9 @@ uv run repopilot serve
 | GET | `/health` `/ready` | 存活 / 就绪探针 |
 
 设置 `REPOPILOT_API_TOKEN` 后，所有 `/api/*` 需要 `Authorization: Bearer <token>`。
+设置 `REPOPILOT_DAILY_TASK_LIMIT` 后，系统会按代理传入的客户端地址哈希限制每天创建的研究任务数；
+额度写入 SQLite，重启不会清零，`0` 表示不限额。它只计算 `POST /api/tasks`，不会消耗查看报告、SSE
+或下载额度。公共 Demo 建议同时配置 API Token，并将 `REPOPILOT_DAILY_QUOTA_TIMEZONE` 设为部署地时区。
 
 ## CLI
 

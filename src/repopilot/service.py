@@ -324,12 +324,25 @@ class TaskService:
         return False
 
     async def shutdown(self) -> None:
+        # Cancel and drain one task at a time.  Concurrent cancellation handlers
+        # can otherwise contend on SQLite while persisting terminal state, which
+        # makes an otherwise graceful application shutdown wait for the driver's
+        # busy timeout.
         for task in list(self._running.values()):
-            if not task.done():
-                task.cancel()
-        for task in list(self._running.values()):
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            if task.done():
+                continue
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=1.0)
+            except (asyncio.CancelledError, TimeoutError):
+                # A provider or database driver may not be interruptible while
+                # it is unwinding.  Do not hold the ASGI lifespan hostage; the
+                # task has already received cancellation and the event loop will
+                # finish collecting it after shutdown.
+                logger.warning(
+                    "Task did not finish cancellation during shutdown",
+                    extra={"error_code": "shutdown_task_timeout"},
+                )
 
     def _spawn(
         self,

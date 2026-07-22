@@ -112,6 +112,16 @@ class ResearchTaskRecord(Base):
     )
 
 
+class DailyUsageRecord(Base):
+    __tablename__ = "daily_usage"
+    __table_args__ = (Index("ix_daily_usage_date", "usage_date"),)
+
+    client_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    usage_date: Mapped[str] = mapped_column(String(10), primary_key=True)
+    task_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class TaskEventRecord(Base):
     __tablename__ = "task_events"
     __table_args__ = (UniqueConstraint("task_id", "sequence", name="uq_task_event_sequence"),)

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- 增加可持久化的按客户端每日研究任务配额；配置 `REPOPILOT_DAILY_TASK_LIMIT` 后，超额返回
+  `429` 和 `Retry-After`，服务重启不会清零。
+
 ## 1.4.0 — 2026-07-22
 
 - 增加持久化多仓库注册表、本地/Git HTTPS onboarding、受控仓库目录和不可变索引 revision；

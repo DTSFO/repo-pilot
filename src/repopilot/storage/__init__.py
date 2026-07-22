@@ -4,6 +4,7 @@ from .models import (
     Base,
     CheckpointRecord,
     ChunkRecord,
+    DailyUsageRecord,
     EvaluationRunRecord,
     EvidenceRecord,
     MemoryItemRecord,
@@ -15,6 +16,7 @@ from .models import (
 )
 from .repositories import (
     ChunkRow,
+    DailyQuotaStore,
     DocumentStore,
     EvidenceStore,
     MemoryStore,
@@ -28,6 +30,8 @@ __all__ = [
     "CheckpointRecord",
     "ChunkRecord",
     "ChunkRow",
+    "DailyQuotaStore",
+    "DailyUsageRecord",
     "Database",
     "DocumentStore",
     "EvaluationRunRecord",
