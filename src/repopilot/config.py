@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -60,6 +60,15 @@ class Settings(BaseSettings):
     sse_poll_seconds: float = Field(default=0.2, ge=0.01, le=5)
     sse_heartbeat_seconds: float = Field(default=15.0, ge=0.01, le=300)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    @field_validator("llm_api_key", "api_token", mode="before")
+    @classmethod
+    def blank_optional_secret_is_none(cls, value: object) -> object:
+        if isinstance(value, SecretStr):
+            return None if not value.get_secret_value().strip() else value
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @model_validator(mode="after")
     def validate_provider_configuration(self) -> Self:

@@ -24,6 +24,12 @@ class SettingsTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Settings(_env_file=None, provider="openai_compatible")
 
+    def test_blank_optional_secrets_are_treated_as_unset(self) -> None:
+        settings = Settings(_env_file=None, api_token="", llm_api_key="   ")
+
+        self.assertIsNone(settings.api_token)
+        self.assertIsNone(settings.llm_api_key)
+
     def test_fetch_hosts_are_normalized(self) -> None:
         settings = Settings(
             _env_file=None,
