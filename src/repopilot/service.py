@@ -209,6 +209,7 @@ class TaskService:
         self.store = store
         self.runtime = runtime
         self._running: dict[str, asyncio.Task[None]] = {}
+        self._shutting_down = False
         # Lifecycle decisions must be serialized per task.  In particular, a
         # resume request performs several awaited reads/writes before it can
         # publish the runner in ``_running``; without this lock two concurrent
@@ -324,6 +325,7 @@ class TaskService:
         return False
 
     async def shutdown(self) -> None:
+        self._shutting_down = True
         # Cancel and drain one task at a time.  Concurrent cancellation handlers
         # can otherwise contend on SQLite while persisting terminal state, which
         # makes an otherwise graceful application shutdown wait for the driver's
@@ -419,7 +421,8 @@ class TaskService:
                 )
             await self._finalize(task_id, result)
         except asyncio.CancelledError:
-            await self._persist_terminal_failure(task_id, "cancelled")
+            if not self._shutting_down:
+                await self._persist_terminal_failure(task_id, "cancelled")
             raise
         except RepoPilotError as exc:
             log_exception_safely(
