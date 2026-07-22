@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,6 +61,20 @@ class TaskStoreTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([event.event_type for event in events], ["two"])
         self.assertEqual(len(tasks), 2)
+
+    async def test_concurrent_event_appends_keep_a_gapless_task_sequence(self) -> None:
+        task = await self.store.create_task("concurrent telemetry")
+
+        await asyncio.gather(
+            *(
+                self.store.append_event(task.id, "provider.progress", {"tick": tick})
+                for tick in range(20)
+            )
+        )
+
+        events = await self.store.list_events(task.id)
+        self.assertEqual([event.sequence for event in events], list(range(1, 21)))
+        self.assertEqual({event.payload_json["tick"] for event in events}, set(range(20)))
 
     async def test_missing_task_is_not_silently_created(self) -> None:
         with self.assertRaises(KeyError):

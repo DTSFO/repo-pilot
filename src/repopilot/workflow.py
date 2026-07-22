@@ -53,9 +53,14 @@ STOP_TOKENS = frozenset(
 MAX_QUERIES = 5
 MAX_RECALLED_MEMORIES = 2
 TOP_K_PER_QUERY = 5
+MAX_RESEARCHER_TOOL_CALLS_PER_ROUND = 2
+MAX_REVIEW_CANDIDATES = 8
 REVIEW_RELATIVE_THRESHOLD = 0.35
 REVIEW_MIN_COVERAGE = 0.3
-QUOTE_MAX_CHARS = 280
+# Reviewer and Writer must see the implementation represented by a chunk, not
+# only its first few lines.  Repository chunks are already bounded to 60 lines;
+# this second bound protects the model context from pathological long lines.
+QUOTE_MAX_CHARS = 3000
 STATE_VERSION = 1
 CITATION_PATTERN = re.compile(r"\[(\d+)\]")
 
@@ -80,6 +85,8 @@ class ReviewDecision:
     reviewed: tuple[ReviewedEvidence, ...]
     needs_revision: bool = False
     additional_queries: tuple[str, ...] = ()
+    missing_requirements: tuple[str, ...] = ()
+    protocol_violation: bool = False
 
 
 GraphNode = Literal["planner", "researcher", "reviewer", "writer", "end"]
@@ -95,6 +102,9 @@ class WorkflowState(TypedDict, total=False):
     subquestions: list[str]
     completion_criteria: list[str]
     pending_queries: list[str]
+    executed_queries: list[str]
+    revision_candidate_ids: list[str]
+    review_missing_requirements: list[str]
     candidates: list[dict[str, Any]]
     reviewed: list[dict[str, Any]]
     review_round: int
@@ -210,6 +220,13 @@ class ResearchWorkflow:
             "subquestions": [str(item) for item in restored.get("subquestions", [])],
             "completion_criteria": [str(item) for item in restored.get("completion_criteria", [])],
             "pending_queries": [str(item) for item in restored.get("pending_queries", [])],
+            "executed_queries": [str(item) for item in restored.get("executed_queries", [])],
+            "revision_candidate_ids": [
+                str(item) for item in restored.get("revision_candidate_ids", [])
+            ],
+            "review_missing_requirements": [
+                str(item) for item in restored.get("review_missing_requirements", [])
+            ],
             "candidates": list(restored.get("candidates", [])),
             "reviewed": list(restored.get("reviewed", [])),
             "review_round": int(restored.get("review_round", 0)),
@@ -223,8 +240,9 @@ class ResearchWorkflow:
         }
         if "final_report" in restored:
             state["final_report"] = str(restored["final_report"])
-        if restored.get("status") == "completed":
-            state["status"] = "completed"
+        restored_status = restored.get("status")
+        if restored_status in {"completed", "guarded"}:
+            state["status"] = restored_status
         rows = await self.documents.latest_chunk_rows()
         row_map = {row.chunk_id: row for row in rows}
         serialized = state.get("candidates", [])
@@ -268,6 +286,9 @@ class ResearchWorkflow:
                 "subquestions": list(plan.subquestions),
                 "completion_criteria": list(plan.completion_criteria),
                 "pending_queries": queries,
+                "executed_queries": [],
+                "revision_candidate_ids": [],
+                "review_missing_requirements": [],
                 "review_round": 0,
                 "total_tokens": int(state.get("total_tokens", 0)) + used_tokens,
                 "degraded": bool(state.get("degraded", False)) or plan_degraded,
@@ -285,12 +306,36 @@ class ResearchWorkflow:
             str(item)
             for item in (state.get("pending_queries") or state.get("queries") or [state["goal"]])
         ]
+        executed_queries = [str(item) for item in state.get("executed_queries", [])]
+        queries = list(self._novel_queries(queries, executed_queries))
+        remaining_tool_calls = max(
+            0,
+            self.settings.max_tool_calls - int(state.get("tool_call_count", 0)),
+        )
+        remaining_model_tokens = max(
+            0,
+            self.settings.max_total_tokens - int(state.get("total_tokens", 0)),
+        )
         used_tokens, tool_calls, research_degraded = await self._research(
-            state["goal"], queries, tools, trace
+            state["goal"],
+            queries,
+            tools,
+            trace,
+            max_tool_calls=remaining_tool_calls,
+            max_model_tokens=remaining_model_tokens,
         )
         reasons = set(state.get("degraded_reasons", []))
         if research_degraded:
             reasons.add("researcher_degraded")
+        if not queries:
+            reasons.add("review_stagnated")
+        if remaining_tool_calls == 0:
+            reasons.add("tool_budget_exhausted")
+        if remaining_model_tokens == 0:
+            reasons.add("token_budget_exhausted")
+        total_tokens = int(state.get("total_tokens", 0)) + used_tokens
+        if total_tokens >= self.settings.max_total_tokens:
+            reasons.add("token_budget_exhausted")
         return self._complete_node(
             state,
             completed_node="researcher",
@@ -299,7 +344,8 @@ class ResearchWorkflow:
             updates={
                 "candidates": self._serialize_candidates(tools.hits),
                 "pending_queries": [],
-                "total_tokens": int(state.get("total_tokens", 0)) + used_tokens,
+                "executed_queries": [*executed_queries, *queries],
+                "total_tokens": total_tokens,
                 "tool_call_count": int(state.get("tool_call_count", 0)) + tool_calls,
                 "degraded": bool(state.get("degraded", False)) or research_degraded,
                 "degraded_reasons": sorted(reasons),
@@ -335,28 +381,72 @@ class ResearchWorkflow:
                     "degraded_reasons": sorted(reasons),
                 },
             )
+        requirements = [
+            str(item)
+            for item in (
+                state.get("completion_criteria") or state.get("subquestions") or [state["goal"]]
+            )
+        ]
+        executed_queries = [str(item) for item in state.get("executed_queries", [])]
+        remaining_model_tokens = max(
+            0,
+            self.settings.max_total_tokens - int(state.get("total_tokens", 0)),
+        )
         decision, used_tokens, review_degraded = await self._review(
-            state["goal"], candidates, row_map, trace
+            state["goal"],
+            candidates,
+            row_map,
+            trace,
+            requirements=requirements,
+            executed_queries=executed_queries,
+            max_model_tokens=remaining_model_tokens,
         )
         reviewed = list(decision.reviewed)
         await self._persist_evidence(state["goal"], reviewed, state.get("task_id"))
         if review_degraded:
             reasons.add("reviewer_fallback")
+        if remaining_model_tokens == 0:
+            reasons.add("token_budget_exhausted")
         review_round = int(state.get("review_round", 0))
         next_node: GraphNode = "writer"
         pending: list[str] = []
-        if (
-            decision.needs_revision
-            and decision.additional_queries
-            and review_round < self.settings.max_review_rounds
-        ):
-            review_round += 1
-            next_node = "researcher"
-            pending = list(decision.additional_queries)
-        elif decision.needs_revision and review_round >= self.settings.max_review_rounds:
-            reasons.add("review_limit_reached")
+        revision_candidate_ids = [str(item) for item in state.get("revision_candidate_ids", [])]
+        current_candidate_ids = {item.scored.chunk.chunk_id for item in reviewed}
+        new_candidates = current_candidate_ids - set(revision_candidate_ids)
+        novel_queries = list(self._novel_queries(decision.additional_queries, executed_queries))[:2]
+        if decision.protocol_violation:
+            reasons.add("reviewer_protocol_violation")
+        elif decision.needs_revision:
+            if not decision.missing_requirements:
+                reasons.add("reviewer_protocol_violation")
+            elif not novel_queries or (
+                review_round > 0 and revision_candidate_ids and not new_candidates
+            ):
+                reasons.add("review_stagnated")
+            elif int(state.get("tool_call_count", 0)) >= self.settings.max_tool_calls:
+                reasons.add("tool_budget_exhausted")
+            elif int(state.get("total_tokens", 0)) + used_tokens >= self.settings.max_total_tokens:
+                reasons.add("token_budget_exhausted")
+            elif review_round < self.settings.max_review_rounds:
+                review_round += 1
+                next_node = "researcher"
+                pending = novel_queries
+                revision_candidate_ids = sorted(current_candidate_ids)
+            else:
+                reasons.add("review_limit_reached")
+        elif decision.missing_requirements:
+            reasons.add("reviewer_protocol_violation")
         degraded = bool(state.get("degraded", False)) or review_degraded
-        degraded = degraded or "review_limit_reached" in reasons
+        degraded = degraded or bool(
+            reasons
+            & {
+                "review_limit_reached",
+                "review_stagnated",
+                "reviewer_protocol_violation",
+                "tool_budget_exhausted",
+                "token_budget_exhausted",
+            }
+        )
         return self._complete_node(
             state,
             completed_node="reviewer",
@@ -365,6 +455,8 @@ class ResearchWorkflow:
             updates={
                 "reviewed": self._serialize_reviewed(reviewed),
                 "pending_queries": pending,
+                "revision_candidate_ids": revision_candidate_ids,
+                "review_missing_requirements": list(decision.missing_requirements),
                 "review_round": review_round,
                 "total_tokens": int(state.get("total_tokens", 0)) + used_tokens,
                 "degraded": degraded,
@@ -402,13 +494,42 @@ class ResearchWorkflow:
         else:
             reviewed = self._deserialize_reviewed(state.get("reviewed", []), candidates)
             accepted = [item.scored for item in reviewed if item.accepted]
-            narrative, used_tokens, writer_degraded = await self._narrative(state["goal"], accepted)
+            remaining_model_tokens = max(
+                0,
+                self.settings.max_total_tokens - int(state.get("total_tokens", 0)),
+            )
+            narrative, used_tokens, writer_degraded = await self._narrative(
+                state["goal"],
+                accepted,
+                max_model_tokens=remaining_model_tokens,
+            )
+            if remaining_model_tokens == 0:
+                reasons.add("token_budget_exhausted")
         if writer_degraded:
             reasons.add("writer_validation_failed")
         if not rows:
             reasons.add("empty_index")
         degraded = bool(state.get("degraded", False)) or bool(reasons)
-        report = self._compose_report(state["goal"], accepted, narrative, index_size=len(retriever))
+        limitations = [str(item) for item in state.get("review_missing_requirements", [])]
+        if "reviewer_protocol_violation" in reasons and not limitations:
+            limitations.append("Reviewer response did not satisfy the review protocol.")
+        report = self._compose_report(
+            state["goal"],
+            accepted,
+            narrative,
+            index_size=len(retriever),
+            limitations=limitations,
+        )
+        guarded_reasons = {
+            "review_limit_reached",
+            "review_stagnated",
+            "reviewer_protocol_violation",
+            "tool_budget_exhausted",
+            "token_budget_exhausted",
+        }
+        status: Literal["completed", "guarded"] = (
+            "guarded" if reasons & guarded_reasons else "completed"
+        )
         await self._remember(state["goal"], accepted, state.get("task_id"))
         trace.extend(
             [
@@ -436,7 +557,7 @@ class ResearchWorkflow:
                 "degraded": degraded,
                 "degraded_reasons": sorted(reasons),
                 "final_report": report,
-                "status": "completed",
+                "status": status,
             },
             assistant_message=report,
         )
@@ -568,6 +689,7 @@ class ResearchWorkflow:
                 },
                 {"role": "user", "content": goal},
             ),
+            max_tokens=max(1, min(2048, self.settings.max_total_tokens)),
             purpose="planner",
         )
         try:
@@ -606,12 +728,22 @@ class ResearchWorkflow:
         return ResearchPlan(tuple(queries[:MAX_QUERIES]))
 
     async def _research(
-        self, goal: str, queries: list[str], tools: RepositoryResearchTools, trace: list[TraceEvent]
+        self,
+        goal: str,
+        queries: list[str],
+        tools: RepositoryResearchTools,
+        trace: list[TraceEvent],
+        *,
+        max_tool_calls: int,
+        max_model_tokens: int,
     ) -> tuple[int, int, bool]:
         degraded = False
         total_tokens = 0
         tool_calls = 0
         for query in queries[:MAX_QUERIES]:
+            if tool_calls >= max_tool_calls:
+                degraded = True
+                break
             try:
                 async with asyncio.timeout(self.settings.tool_timeout_seconds):
                     await tools.registry.aexecute(
@@ -620,7 +752,11 @@ class ResearchWorkflow:
             except (RepoPilotError, TimeoutError):
                 degraded = True
             tool_calls += 1
-        if self.settings.provider != "deterministic" and tool_calls < self.settings.max_tool_calls:
+        if (
+            self.settings.provider != "deterministic"
+            and tool_calls < max_tool_calls
+            and max_model_tokens > 0
+        ):
             conversation: list[dict[str, Any]] = [
                 {
                     "role": "system",
@@ -640,12 +776,21 @@ class ResearchWorkflow:
                 },
             ]
             seen: set[str] = set()
-            for _ in range(min(2, self.settings.max_steps)):
+            # Retrieval hits are accumulated by the tool layer itself, so a second
+            # model turn merely asking whether research is complete adds latency and
+            # often produces another batch of redundant searches. One bounded tool
+            # selection turn keeps the Researcher agentic without multiplying calls.
+            for _ in range(min(1, self.settings.max_steps)):
+                remaining_tokens = max_model_tokens - total_tokens
+                if remaining_tokens <= 0:
+                    degraded = True
+                    break
                 try:
                     response = await self.provider.complete(
                         ModelRequest(
                             messages=tuple(conversation),
                             tools=tuple(tools.registry.descriptions()),
+                            max_tokens=max(1, min(2048, remaining_tokens)),
                             purpose="researcher",
                         )
                     )
@@ -656,7 +801,12 @@ class ResearchWorkflow:
                 degraded = degraded or response.fallback_used
                 if not response.tool_calls:
                     break
-                calls = response.tool_calls[: max(0, self.settings.max_tool_calls - tool_calls)]
+                calls = response.tool_calls[
+                    : min(
+                        MAX_RESEARCHER_TOOL_CALLS_PER_ROUND,
+                        max(0, max_tool_calls - tool_calls),
+                    )
+                ]
                 conversation.append(self._assistant_tool_message(response))
                 results = await asyncio.gather(
                     *(self._execute_research_call(call, tools, seen, trace) for call in calls)
@@ -723,32 +873,38 @@ class ResearchWorkflow:
         hits: list[ScoredChunk],
         row_map: dict[str, ChunkRow],
         trace: list[TraceEvent],
+        *,
+        requirements: list[str],
+        executed_queries: list[str],
+        max_model_tokens: int,
     ) -> tuple[ReviewDecision, int, bool]:
         unique = {hit.chunk.chunk_id: hit for hit in hits if hit.chunk.chunk_id in row_map}
         ordered = sorted(unique.values(), key=lambda item: -item.score)
         best = ordered[0].score if ordered else 0.0
         threshold = best * REVIEW_RELATIVE_THRESHOLD
-        hard_ids = {
-            hit.chunk.chunk_id
+        hard_candidates = [
+            hit
             for hit in ordered
             if hit.score >= threshold and hit.coverage >= REVIEW_MIN_COVERAGE and hit.citation
-        }
+        ][:MAX_REVIEW_CANDIDATES]
+        hard_ids = {hit.chunk.chunk_id for hit in hard_candidates}
         accepted_ids = set(hard_ids)
         reasons: dict[str, str] = {}
         semantic: dict[str, float] = {}
         needs_revision = False
         additional: tuple[str, ...] = ()
+        missing_requirements: tuple[str, ...] = ()
+        protocol_violation = False
         tokens = 0
         degraded = False
-        if self.settings.provider != "deterministic" and hard_ids:
+        if self.settings.provider != "deterministic" and hard_ids and max_model_tokens > 0:
             block = [
                 {
                     "chunk_id": hit.chunk.chunk_id,
                     "citation": hit.citation,
                     "quote": self._quote(hit),
                 }
-                for hit in ordered
-                if hit.chunk.chunk_id in hard_ids
+                for hit in hard_candidates
             ]
             request = ModelRequest(
                 messages=(
@@ -759,19 +915,32 @@ class ResearchWorkflow:
                             "accepted_chunk_ids is an array of strings; needs_revision is a "
                             "boolean; additional_queries is an array of strings; reasons is "
                             "an object mapping chunk IDs to strings; semantic_scores is an "
-                            "object mapping chunk IDs to numbers. Accept only evidence entailed "
+                            "object mapping chunk IDs to numbers; missing_requirements is an "
+                            "array of specific strings copied from the supplied requirements. "
+                            "Accept only evidence entailed "
                             "by its quote. You cannot accept IDs outside the supplied hard-gate "
-                            "candidates. When accepted evidence fully answers the goal, set "
-                            "needs_revision to false and additional_queries to an empty array."
+                            "candidates. Request revision only when at least one supplied "
+                            "requirement remains unsupported, and return at most one targeted, "
+                            "novel query per missing requirement. Never repeat an executed query. "
+                            "When accepted evidence fully answers every requirement, set "
+                            "needs_revision to false, missing_requirements to an empty array, and "
+                            "additional_queries to an empty array. Keep reasons concise and omit "
+                            "semantic_scores when they are not needed; the entire JSON must remain "
+                            "well below the response token limit."
                         ),
                     },
                     {
                         "role": "user",
                         "content": (
-                            f"Goal: {goal}\nCandidates: {json.dumps(block, ensure_ascii=False)}"
+                            f"Goal: {goal}\nRequirements: "
+                            f"{json.dumps(requirements, ensure_ascii=False)}\n"
+                            "Executed queries: "
+                            f"{json.dumps(executed_queries, ensure_ascii=False)}\n"
+                            f"Candidates: {json.dumps(block, ensure_ascii=False)}"
                         ),
                     },
                 ),
+                max_tokens=max(1, min(2048, max_model_tokens)),
                 purpose="reviewer",
             )
             try:
@@ -780,20 +949,37 @@ class ResearchWorkflow:
                 accepted_ids = (
                     set(self._strings(payload.get("accepted_chunk_ids"), len(hard_ids))) & hard_ids
                 )
-                needs_revision = bool(payload.get("needs_revision", False))
+                raw_needs_revision = payload.get("needs_revision", False)
+                if not isinstance(raw_needs_revision, bool):
+                    protocol_violation = True
+                    needs_revision = False
+                else:
+                    needs_revision = raw_needs_revision
                 additional = self._strings(payload.get("additional_queries"), MAX_QUERIES)
+                supplied_requirements = set(requirements)
+                missing_requirements = tuple(
+                    item
+                    for item in self._strings(
+                        payload.get("missing_requirements"), len(requirements)
+                    )
+                    if item in supplied_requirements
+                )
                 reasons = {
                     str(k): str(v)[:200] for k, v in dict(payload.get("reasons") or {}).items()
                 }
                 semantic = {
                     str(k): float(v) for k, v in dict(payload.get("semantic_scores") or {}).items()
                 }
+                if needs_revision != bool(missing_requirements):
+                    protocol_violation = True
                 tokens = response.usage.total_tokens if response.usage else 0
                 degraded = response.fallback_used
                 if degraded:
                     accepted_ids = set(hard_ids)
                     needs_revision = False
                     additional = ()
+                    missing_requirements = ()
+                    protocol_violation = False
                     reasons = {}
                     semantic = {}
             except (RepoPilotError, ValueError, TypeError, json.JSONDecodeError):
@@ -822,10 +1008,21 @@ class ResearchWorkflow:
                     "node": "reviewer",
                     "threshold": round(threshold, 6),
                     "needs_revision": needs_revision,
+                    "missing_requirements": list(missing_requirements),
                 },
             )
         )
-        return ReviewDecision(reviewed, needs_revision, additional), tokens, degraded
+        return (
+            ReviewDecision(
+                reviewed,
+                needs_revision,
+                additional,
+                missing_requirements,
+                protocol_violation,
+            ),
+            tokens,
+            degraded,
+        )
 
     async def _persist_evidence(
         self, goal: str, reviewed: list[ReviewedEvidence], task_id: str | None
@@ -853,10 +1050,16 @@ class ResearchWorkflow:
         )
 
     async def _narrative(
-        self, goal: str, accepted: list[ScoredChunk]
+        self,
+        goal: str,
+        accepted: list[ScoredChunk],
+        *,
+        max_model_tokens: int,
     ) -> tuple[str | None, int, bool]:
         if not accepted or self.settings.provider == "deterministic":
             return None, 0, False
+        if max_model_tokens <= 0:
+            return None, 0, True
         evidence_block = "\n\n".join(
             f"[{index}] {item.citation}\n{self._quote(item)}"
             for index, item in enumerate(accepted, 1)
@@ -875,6 +1078,7 @@ class ResearchWorkflow:
                 },
                 {"role": "user", "content": base_user},
             ),
+            max_tokens=max(1, min(2048, max_model_tokens)),
             purpose="writer",
         )
         try:
@@ -887,6 +1091,9 @@ class ResearchWorkflow:
         if self._valid_narrative(response.text, len(accepted)):
             return response.text, tokens, False
 
+        remaining_repair_tokens = max_model_tokens - tokens
+        if remaining_repair_tokens <= 0:
+            return None, tokens, True
         repair_request = ModelRequest(
             messages=(
                 {
@@ -901,6 +1108,7 @@ class ResearchWorkflow:
                 },
                 {"role": "user", "content": base_user},
             ),
+            max_tokens=max(1, min(2048, remaining_repair_tokens)),
             purpose="writer",
         )
         try:
@@ -920,7 +1128,13 @@ class ResearchWorkflow:
         return bool(refs) and all(1 <= ref <= evidence_count for ref in refs)
 
     def _compose_report(
-        self, goal: str, accepted: list[ScoredChunk], narrative: str | None, *, index_size: int
+        self,
+        goal: str,
+        accepted: list[ScoredChunk],
+        narrative: str | None,
+        *,
+        index_size: int,
+        limitations: list[str] | None = None,
     ) -> str:
         lines = ["# RepoPilot 研究报告", "", f"**目标**: {goal}", ""]
         if not accepted:
@@ -945,6 +1159,15 @@ class ResearchWorkflow:
             )
         if narrative:
             lines.extend(["## 综合分析", "", narrative, ""])
+        if limitations:
+            lines.extend(
+                [
+                    "## 未覆盖要求",
+                    "",
+                    *[f"- {item}" for item in limitations],
+                    "",
+                ]
+            )
         lines.extend(["---", "以上仓库相关结论均附带可定位的 `路径:行号` 引用。"])
         return "\n".join(lines)
 
@@ -1013,6 +1236,32 @@ class ResearchWorkflow:
         return tuple(dict.fromkeys(str(item).strip()[:300] for item in value if str(item).strip()))[
             :limit
         ]
+
+    @staticmethod
+    def _query_fingerprint(query: str) -> str:
+        tokens = sorted(
+            {token for token in tokenize(query) if token not in STOP_TOKENS and len(token) > 1}
+        )
+        return " ".join(tokens) if tokens else query.strip().casefold()
+
+    @classmethod
+    def _novel_queries(
+        cls,
+        proposed: list[str] | tuple[str, ...],
+        executed: list[str],
+    ) -> tuple[str, ...]:
+        seen = {cls._query_fingerprint(query) for query in executed}
+        novel: list[str] = []
+        for query in proposed:
+            normalized = str(query).strip()[:300]
+            if not normalized:
+                continue
+            fingerprint = cls._query_fingerprint(normalized)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            novel.append(normalized)
+        return tuple(novel)
 
     @staticmethod
     def _assistant_tool_message(response: ModelResponse) -> dict[str, Any]:

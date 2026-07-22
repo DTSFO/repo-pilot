@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.3.0 — 2026-07-22
+
+- 将 OpenAI-compatible 调用默认切换为上游 SSE，并在 Provider 内缓冲、合并和校验文本、
+  tool calls、finish reason、served model 与 usage；对外仍返回完整 `ModelResponse`，不暴露未
+  校验的 Planner/Reviewer JSON 碎片或 Writer 草稿。
+- 增加 started/first-byte/progress/completed/retry/timeout/failed/cancelled 生命周期事件、
+  TTFT/请求延迟指标、分阶段 HTTP 超时和安全 telemetry allowlist；SSE transport heartbeat
+  与持久化 Provider progress 使用不同语义。
+- 在 Provider 不返回 usage 时采用明确标记的保守字符估算，避免全局 Token 预算被错误记为
+  0；tool/Token 预算现在跨全部 Researcher 返工轮次累计并在模型调用前拦截。
+- Reviewer 获得完成标准、已执行查询和候选证据上下文；返工查询做新颖性去重，并以证据增量、
+  缺失要求、停滞和协议校验决定是否继续。预算耗尽、返工上限或停滞以 `guarded` 诚实终止。
+- 加固同进程任务事件序号并发分配、SSE heartbeat/重放、Provider 事件 ContextVar 隔离和 UI
+  状态展示；仍不宣称跨副本 pub/sub、in-flight replay 或 exactly-once。
+- 上游 SSE 现在拒绝无 `[DONE]`/terminal finish reason 的提前 EOF；usage 归一化、熔断 open
+  路径、fallback/cancel 终态和安全日志均补齐回归测试。
+- Web UI 移除不可信 `innerHTML`，改用 `textContent` 和可携带内存态 Bearer Header 的 Fetch
+  Streams SSE；Token 不进入 URL 或浏览器持久存储。
+- 发布门禁独立打开并校验 wheel/sdist、包元数据、危险成员和高置信 secret pattern；CI 增加
+  双构建复现、clean-wheel smoke 与 hardened Docker/Compose smoke。
+- 修复并发 resume 可重复启动同一任务、半开熔断探针取消后永久占用许可、重试退避取消缺少
+  terminal 事件，以及显式文件摄取绕过目录安全过滤的发布阻断问题。
+- 检索 Top-K 先按来源多样化再按分数回填，避免单个大文件的重叠 chunk 垄断证据槽位；最终
+  30-case deterministic 回归的 task success 与 Recall@5 均为 `1.0`。
+
 ## 1.2.0 — 2026-07-21
 
 - 将默认控制平面迁移为真实 LangGraph `StateGraph`，显式编译

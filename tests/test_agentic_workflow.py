@@ -72,6 +72,7 @@ class PurposeProvider:
                         "accepted_chunk_ids": [candidates[0]["chunk_id"]],
                         "needs_revision": False,
                         "additional_queries": [],
+                        "missing_requirements": [],
                     }
                 )
             )
@@ -108,7 +109,8 @@ class RevisionProvider(PurposeProvider):
                     {
                         "accepted_chunk_ids": [candidates[0]["chunk_id"]],
                         "needs_revision": True,
-                        "additional_queries": ["version stamp cache invalidation"],
+                        "additional_queries": ["additional cache implementation evidence"],
+                        "missing_requirements": ["find cited implementation"],
                     }
                 )
             )
@@ -130,6 +132,7 @@ class PromotingReviewer:
                     "accepted_chunk_ids": [candidates[0]["chunk_id"], self.rejected_id],
                     "needs_revision": False,
                     "additional_queries": [],
+                    "missing_requirements": [],
                 }
             )
         )
@@ -139,6 +142,25 @@ class PromotingReviewer:
 
     async def close(self) -> None:
         return None
+
+
+class InvalidBooleanReviewer(PurposeProvider):
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        if request.purpose == "reviewer":
+            self.requests.append(request)
+            user = str(request.messages[-1]["content"])
+            candidates = json.loads(user.split("Candidates: ", 1)[1])
+            return ModelResponse(
+                text=json.dumps(
+                    {
+                        "accepted_chunk_ids": [candidates[0]["chunk_id"]],
+                        "needs_revision": "false",
+                        "additional_queries": [],
+                        "missing_requirements": [],
+                    }
+                )
+            )
+        return await super().complete(request)
 
 
 @pytest.fixture
@@ -244,9 +266,11 @@ async def test_langgraph_reviewer_conditionally_routes_back_before_writer(
     assert result.degraded is True
     assert any(
         event.metadata.get("node") == "writer"
-        and "review_limit_reached" in event.metadata.get("degraded_reasons", [])
+        and "review_stagnated" in event.metadata.get("degraded_reasons", [])
         for event in result.trace
     )
+    assert result.status == "guarded"
+    assert "## 未覆盖要求" in result.answer
 
 
 async def test_model_plan_and_read_only_tool_drive_research(
@@ -264,7 +288,6 @@ async def test_model_plan_and_read_only_tool_drive_research(
     assert [request.purpose for request in provider.requests] == [
         "planner",
         "researcher",
-        "researcher",
         "reviewer",
         "writer",
     ]
@@ -278,6 +301,50 @@ async def test_model_plan_and_read_only_tool_drive_research(
         event.event == "tool" and event.metadata["tool"] == "search_repository"
         for event in result.trace
     )
+
+
+async def test_reviewer_receives_bounded_chunk_content_beyond_the_prefix(
+    workflow_parts: tuple[Settings, DocumentStore, EvidenceStore, Database],
+) -> None:
+    settings, documents, evidence, _ = workflow_parts
+    long_prefix = "prefix material\n" * 30
+    target = "builder.add_conditional_edges reviewer researcher writer"
+    document, _ = await documents.upsert_document(
+        source_uri="workflow.py",
+        source_type="repository_file",
+        title="workflow.py",
+        content=f"{long_prefix}{target}\n",
+    )
+    await documents.replace_chunks(
+        document.id,
+        [
+            {
+                "content": f"{long_prefix}{target}",
+                "token_count": 100,
+                "line_start": 1,
+                "line_end": 31,
+            }
+        ],
+    )
+    rows = await documents.latest_chunk_rows()
+    row = next(item for item in rows if item.source_uri == "workflow.py")
+    provider = PurposeProvider()
+    workflow = ResearchWorkflow(provider, documents, evidence, settings)
+
+    decision, _tokens, degraded = await workflow._review(
+        target,
+        [ScoredChunk(row, score=10.0, coverage=1.0)],
+        {row.chunk_id: row},
+        [],
+        requirements=[target],
+        executed_queries=[target],
+        max_model_tokens=settings.max_total_tokens,
+    )
+
+    reviewer = next(request for request in provider.requests if request.purpose == "reviewer")
+    assert target in str(reviewer.messages[-1]["content"])
+    assert sum(item.accepted for item in decision.reviewed) == 1
+    assert degraded is False
 
 
 async def test_invalid_planner_falls_back_and_marks_degraded(
@@ -420,6 +487,36 @@ async def test_resume_from_writer_does_not_repeat_prior_nodes(
 
     assert result.status == "completed"
     assert [request.purpose for request in resumed_provider.requests] == ["writer"]
+
+
+async def test_resume_from_guarded_end_preserves_terminal_status(
+    workflow_parts: tuple[Settings, DocumentStore, EvidenceStore, Database],
+) -> None:
+    settings, documents, evidence, _ = workflow_parts
+    messages = [
+        {"role": "user", "content": "cache version stamp"},
+        {
+            "role": "system",
+            "content": "RepoPilot LangGraph workflow checkpoint",
+            "_repopilot_state": {
+                "schema_version": 1,
+                "goal": "cache version stamp",
+                "next_node": "end",
+                "status": "guarded",
+                "degraded": True,
+                "degraded_reasons": ["review_stagnated"],
+                "final_report": "guarded report",
+            },
+        },
+    ]
+
+    result = await ResearchWorkflow(PurposeProvider(), documents, evidence, settings).run(
+        "cache version stamp", initial_messages=messages
+    )
+
+    assert result.status == "guarded"
+    assert result.degraded is True
+    assert result.answer == "guarded report"
 
 
 async def test_resume_researches_again_when_checkpoint_chunks_drift(
@@ -576,6 +673,9 @@ async def test_reviewer_cannot_promote_hard_gate_rejection(
         [good, low_coverage, good, ScoredChunk(stale_row, score=20.0, coverage=1.0)],
         {row.chunk_id: row for row in rows},
         [],
+        requirements=["find cited implementation"],
+        executed_queries=[],
+        max_model_tokens=settings.max_total_tokens,
     )
 
     accepted = {item.scored.chunk.chunk_id for item in decision.reviewed if item.accepted}
@@ -584,19 +684,79 @@ async def test_reviewer_cannot_promote_hard_gate_rejection(
     assert degraded is False
 
 
+async def test_reviewer_semantic_candidate_set_is_bounded(
+    workflow_parts: tuple[Settings, DocumentStore, EvidenceStore, Database],
+) -> None:
+    settings, documents, evidence, _ = workflow_parts
+    rows = await documents.latest_chunk_rows()
+    base = rows[0]
+    synthetic = [
+        ChunkRow(
+            chunk_id=f"candidate-{index}",
+            document_id=base.document_id,
+            source_uri=f"candidate-{index}.py",
+            title=f"candidate-{index}.py",
+            content="bounded reviewer evidence",
+            ordinal=1,
+            line_start=1,
+            line_end=1,
+        )
+        for index in range(12)
+    ]
+    provider = PurposeProvider()
+    workflow = ResearchWorkflow(provider, documents, evidence, settings)
+
+    await workflow._review(
+        "bounded reviewer evidence",
+        [
+            ScoredChunk(row, score=10.0 - index / 100, coverage=1.0)
+            for index, row in enumerate(synthetic)
+        ],
+        {row.chunk_id: row for row in synthetic},
+        [],
+        requirements=["bounded reviewer evidence"],
+        executed_queries=[],
+        max_model_tokens=settings.max_total_tokens,
+    )
+
+    reviewer = next(request for request in provider.requests if request.purpose == "reviewer")
+    candidates = json.loads(str(reviewer.messages[-1]["content"]).split("Candidates: ", 1)[1])
+    assert len(candidates) == 8
+
+
+async def test_reviewer_protocol_type_violation_is_guarded(
+    workflow_parts: tuple[Settings, DocumentStore, EvidenceStore, Database],
+) -> None:
+    settings, documents, evidence, _ = workflow_parts
+    result = await ResearchWorkflow(InvalidBooleanReviewer(), documents, evidence, settings).run(
+        "cache version stamp"
+    )
+
+    assert result.status == "guarded"
+    assert result.degraded is True
+    assert "Reviewer response did not satisfy the review protocol." in result.answer
+    writer_event = next(
+        event
+        for event in result.trace
+        if event.event == "workflow" and event.metadata.get("node") == "writer"
+    )
+    assert "reviewer_protocol_violation" in writer_event.metadata["degraded_reasons"]
+
+
 async def test_revision_rounds_stop_at_exact_configured_limit_and_replace_evidence(
     workflow_parts: tuple[Settings, DocumentStore, EvidenceStore, Database],
 ) -> None:
     settings, documents, evidence, _ = workflow_parts
-    bounded = settings.model_copy(update={"max_review_rounds": 2, "max_steps": 1})
+    bounded = settings.model_copy(update={"max_review_rounds": 0, "max_steps": 1})
     provider = RevisionProvider()
 
     result = await ResearchWorkflow(provider, documents, evidence, bounded).run(
         "cache version stamp", task_id="revision-limit"
     )
 
-    assert provider.review_calls == 3  # initial review + exactly two additional rounds
-    assert provider.research_calls == 3
+    assert provider.review_calls == 1
+    assert provider.research_calls == 1
+    assert result.status == "guarded"
     assert result.degraded is True
     writer_event = next(
         event
@@ -607,6 +767,68 @@ async def test_revision_rounds_stop_at_exact_configured_limit_and_replace_eviden
     stored = await evidence.list_evidence("revision-limit")
     assert stored
     assert len({item.chunk_id for item in stored}) == len(stored)
+
+
+async def test_revision_does_not_receive_a_fresh_task_tool_budget(
+    workflow_parts: tuple[Settings, DocumentStore, EvidenceStore, Database],
+) -> None:
+    settings, documents, evidence, _ = workflow_parts
+    bounded = settings.model_copy(
+        update={"max_review_rounds": 2, "max_steps": 1, "max_tool_calls": 1}
+    )
+    provider = RevisionProvider()
+
+    result = await ResearchWorkflow(provider, documents, evidence, bounded).run(
+        "cache version stamp"
+    )
+
+    assert provider.research_calls == 0
+    assert provider.review_calls == 1
+    assert result.status == "guarded"
+    writer_event = next(
+        event
+        for event in result.trace
+        if event.event == "workflow" and event.metadata.get("node") == "writer"
+    )
+    assert "tool_budget_exhausted" in writer_event.metadata["degraded_reasons"]
+
+
+async def test_task_token_budget_stops_later_model_roles(
+    workflow_parts: tuple[Settings, DocumentStore, EvidenceStore, Database],
+) -> None:
+    settings, documents, evidence, _ = workflow_parts
+
+    class PlannerConsumesBudget(PurposeProvider):
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            if request.purpose == "planner":
+                self.requests.append(request)
+                return ModelResponse(
+                    text=json.dumps(
+                        {
+                            "queries": ["version stamp"],
+                            "subquestions": [],
+                            "completion_criteria": ["find cited implementation"],
+                        }
+                    ),
+                    usage=TokenUsage(total_tokens=5),
+                )
+            return await super().complete(request)
+
+    bounded = settings.model_copy(update={"max_total_tokens": 1, "max_steps": 1})
+    provider = PlannerConsumesBudget()
+    result = await ResearchWorkflow(provider, documents, evidence, bounded).run(
+        "cache version stamp"
+    )
+
+    assert [request.purpose for request in provider.requests] == ["planner"]
+    assert result.status == "guarded"
+    assert result.total_tokens == 5
+    writer_event = next(
+        event
+        for event in result.trace
+        if event.event == "workflow" and event.metadata.get("node") == "writer"
+    )
+    assert "token_budget_exhausted" in writer_event.metadata["degraded_reasons"]
 
 
 async def test_repository_tools_search_and_read_contract(

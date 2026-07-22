@@ -30,8 +30,35 @@ SKIPPED_DIRECTORIES = frozenset(
         ".vscode",
         "data",
         "evals",
+        ".aws",
+        ".azure",
+        ".gnupg",
+        ".kube",
+        ".ssh",
     }
 )
+SENSITIVE_FILE_NAMES = frozenset(
+    {
+        ".env",
+        ".env.local",
+        ".env.development",
+        ".env.production",
+        ".env.test",
+        ".npmrc",
+        ".netrc",
+        ".pypirc",
+        "credentials",
+        "credentials.json",
+        "credentials.yaml",
+        "credentials.yml",
+        "secrets.json",
+        "secrets.yaml",
+        "secrets.yml",
+        "id_rsa",
+        "id_ed25519",
+    }
+)
+SAFE_SPECIAL_NAMES = frozenset({"dockerfile", "makefile", "license"})
 TEXT_SUFFIXES = frozenset(
     {
         ".py",
@@ -72,7 +99,7 @@ CHUNK_OVERLAP_LINES = 10
 
 class IngestionPathError(RepoPilotError):
     code = "ingestion_path_rejected"
-    safe_message = "The requested path is outside the allowed workspace."
+    safe_message = "The requested path is not an allowed workspace source."
     http_status = HTTPStatus.BAD_REQUEST
 
 
@@ -132,8 +159,26 @@ class RepositoryIngestor:
 
     def resolve_safe_path(self, relative: str | None = None) -> Path:
         root = self.settings.resolved_workspace_root
-        candidate = (root / relative).resolve() if relative else root
+        if relative is None:
+            return root
+        requested = Path(relative)
+        # The public API accepts workspace-relative paths only.  Reject parent
+        # segments before resolving so a symlink cannot be combined with `..`
+        # to evade the lexical policy.
+        if requested.is_absolute() or ".." in requested.parts:
+            raise IngestionPathError(details={"path": str(relative)})
+        lexical = root / requested
+        cursor = root
+        for part in requested.parts:
+            if part in {"", "."}:
+                continue
+            cursor /= part
+            if cursor.is_symlink():
+                raise IngestionPathError(details={"path": str(relative)})
+        candidate = lexical.resolve()
         if candidate != root and root not in candidate.parents:
+            raise IngestionPathError(details={"path": str(relative)})
+        if not candidate.exists():
             raise IngestionPathError(details={"path": str(relative)})
         return candidate
 
@@ -167,22 +212,41 @@ class RepositoryIngestor:
         return IngestionReport(scanned, ingested, unchanged, skipped, total_chunks)
 
     def _iter_files(self, target: Path) -> list[Path]:
+        root = self.settings.resolved_workspace_root
         if target.is_file():
+            if not self._is_allowed_file(target, root):
+                raise IngestionPathError(details={"path": target.relative_to(root).as_posix()})
             return [target]
         files: list[Path] = []
         for path in sorted(target.rglob("*")):
             if not path.is_file() or path.is_symlink():
                 continue
-            if any(part in SKIPPED_DIRECTORIES for part in path.parts):
-                continue
-            if path.suffix.lower() not in TEXT_SUFFIXES and path.name.lower() not in {
-                "dockerfile",
-                "makefile",
-                "license",
-            }:
+            if not self._is_allowed_file(path, root):
                 continue
             files.append(path)
         return files
+
+    @staticmethod
+    def _is_allowed_file(path: Path, root: Path) -> bool:
+        """Apply identical filtering to directory walks and explicit files."""
+
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            return False
+        parts = relative.parts
+        if any(part in SKIPPED_DIRECTORIES for part in parts[:-1]):
+            return False
+        name = path.name.lower()
+        if name in SENSITIVE_FILE_NAMES or (name.startswith(".env.") and name != ".env.example"):
+            return False
+        if path.suffix.lower() in {".pem", ".key", ".p12", ".pfx", ".der"}:
+            return False
+        return (
+            path.suffix.lower() in TEXT_SUFFIXES
+            or name.endswith(".env.example")
+            or name in SAFE_SPECIAL_NAMES
+        )
 
     def _read_text(self, path: Path) -> str | None:
         try:

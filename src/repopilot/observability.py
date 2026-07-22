@@ -89,6 +89,25 @@ HTTP_REQUESTS = Counter(
 REQUEST_LATENCY = Histogram(
     "repopilot_http_request_seconds", "HTTP request latency", ["method", "path"]
 )
+PROVIDER_EVENTS = Counter(
+    "repopilot_provider_events_total",
+    "Content-free model provider lifecycle events",
+    ["provider", "purpose", "phase"],
+)
+PROVIDER_TIME_TO_FIRST_BYTE = Histogram(
+    "repopilot_provider_time_to_first_byte_seconds",
+    "Time from provider request start to first response byte",
+    ["provider", "purpose"],
+)
+PROVIDER_REQUEST_LATENCY = Histogram(
+    "repopilot_provider_request_seconds",
+    "Provider request latency by terminal outcome",
+    ["provider", "purpose", "outcome"],
+)
+PROVIDER_TELEMETRY_DROPPED = Counter(
+    "repopilot_provider_telemetry_dropped_total",
+    "Provider lifecycle events dropped because the configured sink failed",
+)
 
 
 def metrics_payload() -> tuple[bytes, str]:

@@ -12,21 +12,14 @@ import hashlib
 import json
 import shutil
 import subprocess
-import tarfile
 import tempfile
 import tomllib
-import zipfile
 from pathlib import Path
 
-FORBIDDEN_BASENAMES = {
-    ".env",
-    "id_rsa",
-    "id_ed25519",
-    "release-manifest.json",
-    "sha256sums",
-}
-FORBIDDEN_NAME_TOKENS = ("api_key", "apikey", "secret")
-EXTERNAL_RELEASE_RECORDS = ("docs/acceptance.md",)
+if __package__:
+    from .check_release import validate_distribution_set
+else:
+    from check_release import validate_distribution_set
 
 
 def project_metadata(root: Path) -> tuple[str, str]:
@@ -47,26 +40,8 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def members(path: Path) -> list[str]:
-    if path.suffix == ".whl":
-        with zipfile.ZipFile(path) as archive:
-            return archive.namelist()
-    with tarfile.open(path, "r:gz") as archive:
-        return archive.getnames()
-
-
 def is_distribution(path: Path) -> bool:
     return path.is_file() and (path.suffix == ".whl" or path.name.endswith(".tar.gz"))
-
-
-def forbidden_member(name: str) -> bool:
-    normalized = name.replace("\\", "/").lower().lstrip("./")
-    basename = Path(normalized).name
-    return (
-        basename in FORBIDDEN_BASENAMES
-        or any(normalized.endswith(record) for record in EXTERNAL_RELEASE_RECORDS)
-        or any(token in basename for token in FORBIDDEN_NAME_TOKENS)
-    )
 
 
 def main() -> int:
@@ -82,14 +57,9 @@ def main() -> int:
         build_dir = Path(temporary) / "dist"
         subprocess.run(["uv", "build", "--out-dir", str(build_dir)], cwd=root, check=True)
         artifacts = sorted(path for path in build_dir.iterdir() if is_distribution(path))
-        if not artifacts:
-            raise SystemExit("uv build produced no artifacts")
+        validate_distribution_set(artifacts, project_name, project_version)
         copied_artifacts = []
         for artifact in artifacts:
-            names = members(artifact)
-            bad = [name for name in names if forbidden_member(name)]
-            if bad:
-                raise SystemExit(f"forbidden content in {artifact.name}: {bad}")
             destination = out_dir / artifact.name
             shutil.copy2(artifact, destination)
             copied_artifacts.append(destination)

@@ -1,4 +1,4 @@
-# RepoPilot v1.2 Architecture
+# RepoPilot v1.3 Architecture
 
 ## System overview
 
@@ -10,12 +10,12 @@ FastAPI application  ◄──────────────  repopilot mc
   ├── LangGraph          compiled StateGraph · conditional revision edge · typed workflow state
   ├── Role harnesses     model-driven tool loops · schema contracts · evidence-scoped prompts
   ├── ToolRegistry       schema-validated allowlist · read-only execution · observations
-  ├── AsyncAgentRuntime  shared budgets · retries · concurrency · fallback provenance
+  ├── AsyncAgentRuntime  task-global budgets · retries · concurrency · fallback provenance
   ├── HybridRetriever    BM25 × weak deterministic hashed-embedding bonus
   ├── MemoryStore        task summaries · bounded recall · expiry
   ├── RepositoryIngestor safe walk · versioned documents · line-window chunks
-  ├── Providers          Resilient(retry + circuit breaker + fallback) → live / deterministic
-  ├── Observability      typed trace · JSON redaction · Prometheus /metrics
+  ├── Providers          Resilient → buffered upstream SSE / deterministic fallback
+  ├── Observability      lifecycle timeline · TTFT/latency · JSON redaction · Prometheus
   └── Storage            SQLite/SQLAlchemy async (PostgreSQL-ready URL switch)
 ```
 
@@ -50,15 +50,19 @@ Researcher ── candidate evidence ──► Reviewer
 ```
 
 `max_review_rounds` means the number of additional Researcher → Reviewer rounds allowed after the
-initial review. The state machine always terminates because review rounds, model steps, tool calls,
-tokens, timeouts, and duplicate tool fingerprints are bounded by code.
+initial review. Tool calls and Tokens are task-global counters, not fresh allowances per revision.
+The state machine always terminates because review rounds, model steps, tool calls, tokens,
+timeouts, duplicate tool fingerprints, query novelty, and evidence-increment checks are bounded by
+code.
 
 The graph has four named nodes and one conditional decision after Reviewer:
 
 - `planner → researcher → reviewer` is the initial path;
-- Reviewer routes to `researcher` only when it returns validated `additional_queries` and the
-  revision budget remains;
-- otherwise Reviewer routes to `writer`, which terminates the graph after citation validation.
+- Reviewer routes to `researcher` only when it identifies missing completion requirements, returns
+  novel validated `additional_queries`, has not stagnated, and both revision and task-global budgets
+  remain;
+- otherwise Reviewer routes to `writer`, which either completes normally or returns an explicit
+  guarded result after citation validation.
 
 Why use LangGraph here instead of a plain `while` loop? RepoPilot now needs a first-class graph
 topology, named node boundaries, conditional revision, durable state hand-off, and a clear place to
@@ -99,9 +103,13 @@ Review is deliberately split into two layers:
 2. In live-provider mode an LLM reviews relevance and entailment among hard-gate candidates and may
    request bounded additional queries.
 
-The semantic reviewer can only remove evidence from the hard-gate set. It cannot promote a stale,
-low-coverage, duplicate, or unresolvable chunk. Malformed/fallback review output uses the hard-gate
-decision and marks the task degraded.
+The semantic reviewer receives the completion requirements, already executed queries, and current
+candidates. It can only remove evidence from the hard-gate set; it cannot promote a stale,
+low-coverage, duplicate, or unresolvable chunk. The local controller—not the model's
+`needs_revision` boolean alone—decides the next edge. It fingerprints additional queries, permits at
+most two novel queries per round, requires an explicit missing-requirement rationale, and stops when
+a revision adds no candidates. Malformed/fallback review output uses the hard-gate decision and
+marks the task degraded.
 
 ### Writer
 
@@ -117,10 +125,11 @@ skipped and the workflow refuses unsupported conclusions.
 Each node writes a versioned WorkflowState snapshot containing at least:
 
 - schema version, goal, and next node;
-- plan queries, subquestions, completion criteria, and pending revision queries;
+- plan queries, subquestions, completion criteria, executed queries, and pending revision queries;
 - candidate chunk IDs with retrieval score and coverage;
 - reviewed chunk IDs with accepted/rejected status, reason, and optional semantic score;
-- current review round and token/tool budget counters;
+- current review round, previous revision candidate IDs, missing requirements, and task-global
+  token/tool budget counters;
 - `degraded` plus structured degradation reasons.
 
 On resume, the graph restores this state and continues from the recorded node/round instead
@@ -130,10 +139,12 @@ safe re-research. Evidence persistence replaces the task's final review snapshot
 so resume and review loops do not create duplicate rows.
 
 Duplicate tool fingerprints are scoped to one Researcher node execution and are not presented as an
-intra-node resumable log. Checkpoints are committed at node boundaries. This is node/round-level
-recovery, not replay of an in-flight HTTP/model request. If interruption happens before a node
-boundary commits, that node's bounded idempotent work may run again; external side effects would
-require operation IDs and a durable effect log before they could be advertised as exactly-once.
+intra-node resumable log. Checkpoints are committed at node boundaries. Provider lifecycle events
+are a diagnostic timeline, not checkpoints: a process crash may leave an old `call_id` without a
+terminal event, and recovery starts a new Provider call. This is node/round-level recovery, not
+replay of an in-flight HTTP/model request. If interruption happens before a node boundary commits,
+that node's bounded idempotent work may run again; external side effects would require operation IDs
+and a durable effect log before they could be advertised as exactly-once.
 
 SQLAlchemy `TaskStore` is the single durable source of truth for tasks, events, and versioned
 WorkflowState checkpoints. LangGraph owns graph execution and routing, but RepoPilot deliberately
@@ -141,13 +152,36 @@ does not attach a second LangGraph checkpoint saver. Two persistence authorities
 dual-write ordering, reconciliation, and ambiguous-resume problems; keeping one store also lets the
 REST API, SSE, MCP, evaluation, cancel, and resume paths observe the same committed state.
 
-## Event streaming semantics
+## Provider and task streaming semantics
 
-Task events are appended to SQLite with monotonically ordered IDs. The SSE endpoint first queries
-events newer than `Last-Event-ID`, then continues by short-polling the same table until terminal
-state or disconnect. This gives reconnect replay for committed events on a single persisted
-database. It is not push-based pub/sub, does not preserve an in-memory socket across restart, and
-does not by itself provide cross-replica fan-out.
+There are two separate streaming layers:
+
+1. The OpenAI-compatible adapter sends `stream=true` upstream by default. It consumes SSE chunks,
+   merges text and fragmented tool calls, captures finish reason/model/usage, validates the complete
+   structure, and only then returns one `ModelResponse` to Planner, Researcher, Reviewer, or Writer.
+   Unvalidated JSON fragments and Writer drafts are never exposed as the task answer. A Provider
+   that returns ordinary JSON despite `stream=true` is also accepted. Streaming and
+   `stream_options.include_usage` can be disabled independently for compatibility.
+2. The FastAPI task endpoint streams durable task events to the browser. It is not a token proxy for
+   the upstream model response.
+
+Provider calls emit content-free lifecycle phases: `started`, `first_byte`, `progress`, `completed`,
+`retry`, `timeout`, `failed`, and `cancelled`. Periodic progress records distinguish
+`waiting_first_byte` from `receiving` and include only bounded counters. TTFT, terminal request
+latency, phase counts, and dropped telemetry are exported to Prometheus. A telemetry sink failure is
+counted and safely logged but cannot change inference success.
+
+Task events are appended to SQLite with monotonically ordered per-task sequences. The SSE endpoint
+first queries events newer than `Last-Event-ID`, then continues by configurable short polling until
+terminal state or disconnect. When no durable event is available it can emit an unnumbered,
+non-persistent `: keep-alive` comment. This heartbeat proves only that RepoPilot and the client
+transport are alive; it must not be interpreted as upstream model progress. Response headers disable
+transforming/buffering proxies where supported.
+
+Provider callbacks and node checkpoints can append concurrently. `TaskStore` serializes sequence
+allocation per task with an in-process lock and bounded uniqueness retry. This gives continuous
+ordering for a single RepoPilot process and persisted database, not multi-process coordination,
+push-based pub/sub, cross-replica fan-out, or exactly-once delivery.
 
 ## Interview-grade trade-offs
 
@@ -162,6 +196,10 @@ does not by itself provide cross-replica fan-out.
 - **Why SQLite polling SSE?** It is small, durable, testable, and adequate for a single self-hosted
   instance. Redis Streams/Kafka/PostgreSQL LISTEN-NOTIFY become justified with multiple workers or
   latency/fan-out SLOs.
+- **Why buffer Provider SSE?** TTFT and progress become observable without allowing partial,
+  schema-invalid role output to leak across the Harness boundary. Token-level user rendering would
+  require a separate validated protocol for each role and is intentionally not conflated with task
+  event streaming.
 - **Why deterministic baseline?** It isolates workflow/retrieval regressions from model drift. Live
   Provider experiments answer a different question and must record endpoint, model and config.
 - **What is not exactly-once?** In-flight Provider calls. Checkpoints describe committed state at
@@ -172,16 +210,31 @@ does not by itself provide cross-replica fan-out.
   the model. Adding a Writer → Researcher edge would expand the advertised topology and can lose
   liveness under continuous ingestion unless a second retry budget is introduced.
 
-## Provider and degraded semantics
+## Provider, usage, guarded, and degraded semantics
 
 The OpenAI-compatible adapter is optional and receives base URL, model, and key only from settings.
-The resilient wrapper applies timeout, bounded retry, and circuit breaking before using the
-deterministic fallback. A fallback response carries explicit provenance (`fallback_used`) through
-model response, runtime trace, workflow state, and final task status; fallback never masquerades as
-a successful live-model answer.
+It has separate connect/read/write/pool timeouts. The resilient wrapper applies bounded retry and
+circuit breaking before using the deterministic fallback. Retries share one logical `call_id` with
+increasing attempts; fallback emits its own terminal lifecycle event. A fallback response carries
+explicit provenance (`fallback_used`) through model response, runtime trace, workflow state, and
+final task status; fallback never masquerades as a successful live-model answer.
 
-Optional enrichment failures preserve verified evidence and produce `degraded=true`. Failures that
-prevent evidence verification result in refusal rather than unsupported generation.
+When the Provider supplies streaming usage, RepoPilot uses it. Compatible endpoints that omit usage
+receive a conservative character-based estimate so the task-global Token budget is not silently
+recorded as zero. Lifecycle metadata marks `usage_reported` versus `usage_estimated`; an estimate is
+budget accounting, not official billing data.
+
+Durable Provider metadata is flattened through an explicit allowlist. It may include call/attempt,
+configured and served model, purpose, elapsed time, progress counters, safe error codes, timeout
+phase, usage counters, and fallback provenance. It excludes base URLs, keys, prompts, completions,
+raw exception text, response bodies, token deltas, response IDs, and tool arguments.
+
+`degraded` and `guarded` are different axes. `degraded=true` records fallback, protocol failure,
+corpus drift, or another reduced-capability condition and may accompany either a completed or
+guarded task. The workflow returns terminal `guarded` when review limit, evidence/query stagnation,
+or task-global Tool/Token exhaustion prevents a safe normal completion. Optional enrichment
+failures preserve verified evidence; failures that prevent evidence verification result in refusal
+rather than unsupported generation.
 
 ## Evidence and retrieval
 
@@ -197,7 +250,9 @@ embedding. Model-based review does not change that retrieval claim.
 - Repository documents and tool observations are untrusted data, never executable instructions.
 - The production workflow exposes only registered read-only repository tools; unknown names fail
   closed.
-- Workspace resolution rejects traversal and symlink escapes for ingestion, uploads, and MCP reads.
+- Workspace resolution rejects traversal and symlinks; ingestion applies one allowlist to directory
+  walks and explicit files, excluding VCS/config directories, credential-like files, and private-key
+  formats before content enters the index.
 - Model decisions cannot increase permissions, bypass hard evidence gates, change budgets, or select
   arbitrary filesystem/network operations.
 

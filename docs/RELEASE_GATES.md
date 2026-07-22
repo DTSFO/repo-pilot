@@ -1,7 +1,123 @@
-# RepoPilot v1.2 Release Gates
+# RepoPilot v1.3 Release Gates
+
+`v1.0.0`, `v1.1.0`, and `v1.2.0` are frozen historical releases. Their acceptance numbers,
+artifact hashes, and image digests must not be rewritten. `v1.3.0` is frozen only after every open
+gate below is backed by command output or an inspectable test against the final packaged source.
+
+## v1.3 workflow and convergence
+
+- [x] Default orchestration remains the compiled LangGraph Planner → Researcher ⇄ Reviewer → Writer
+  `StateGraph`; Provider streaming does not replace role or graph boundaries.
+- [x] Reviewer receives completion criteria, executed queries, and candidates; code—not the model
+  boolean alone—owns routing.
+- [x] Additional queries are fingerprinted for novelty, bounded to two per round, and require
+  explicit missing requirements.
+- [x] Revision stops when queries repeat, a revision adds no candidate, review limit is reached, or
+  task-global Tool/Token budgets are exhausted.
+- [x] Resume and cancel lifecycle decisions use a per-task in-process lock, so concurrent resume
+  requests cannot launch duplicate runners; the guarantee is intentionally single-process.
+- [x] `review_limit_reached`, `review_stagnated`, `tool_budget_exhausted`, and
+  `token_budget_exhausted` produce terminal `guarded`; missing requirements remain visible in the
+  report.
+- [x] Tool and Token counters are cumulative across all Researcher revisions. Remaining Tool budget
+  gates later repository calls; remaining Token budget gates later Researcher, Reviewer, and Writer
+  model calls.
+- [x] `degraded` remains orthogonal to `guarded`: fallback/protocol/corpus-drift degradation can
+  accompany completed or guarded outcomes and is never hidden.
+
+## v1.3 Provider streaming and observability
+
+- [x] OpenAI-compatible calls default to upstream `stream=true`, buffer/merge text and fragmented
+  tool calls, validate the final structure, and return one `ModelResponse` to role logic.
+- [x] A Provider returning ordinary JSON for a streaming request remains compatible; streaming and
+  `stream_options.include_usage` can be disabled independently.
+- [x] Connect/read/write/pool timeouts are separately configurable; retries share a logical
+  `call_id` and attempt counter; fallback emits a terminal lifecycle event.
+- [x] Lifecycle phases cover started, first byte, progress, retry, timeout, failure, cancellation,
+  and completion. Progress distinguishes `waiting_first_byte` from `receiving`.
+- [x] Prometheus exposes Provider phase counts, TTFT, terminal request latency, and dropped telemetry.
+- [x] A telemetry sink failure is best-effort, safely logged, and cannot turn Provider success into
+  inference failure.
+- [x] Missing Provider usage receives a conservative, explicitly marked estimate so task-global
+  budget accounting cannot silently remain zero. Docs do not present estimates as billing data.
+- [x] Durable lifecycle metadata passes an explicit allowlist and excludes URL, key, prompt,
+  content/completion, raw exception text, token deltas, response IDs, and tool arguments.
+
+## v1.3 task SSE, persistence, and recovery
+
+- [x] Provider lifecycle events are bound to the active task through async-context-local state and
+  are persisted before a workflow node completes.
+- [x] Task SSE replays durable events newer than `Last-Event-ID` and includes event `created_at`.
+- [x] SSE `: keep-alive` is unnumbered and non-persistent; docs distinguish it from durable
+  `provider.request.progress`.
+- [x] Poll and heartbeat intervals are configurable; `Cache-Control: no-cache, no-transform` and
+  proxy-buffering guidance protect timely delivery.
+- [x] Same-task event sequence allocation is serialized per process with bounded uniqueness retry,
+  covering concurrent Provider ticks and node events.
+- [x] Docs limit that sequence guarantee to one RepoPilot process and persisted database; they do
+  not claim a cross-replica event bus or pub/sub.
+- [x] Provider events are diagnostic timeline entries, not checkpoints. Recovery remains committed
+  node/round recovery and does not claim in-flight replay, terminal event completion after crash, or
+  exactly-once execution.
+- [x] A cancelled half-open probe releases its permit, and cancellation during retry backoff emits a
+  wrapper-owned terminal event while preserving `CancelledError` propagation.
+
+## v1.3 quality evidence
+
+- [x] Final implementation gate: 164 tests passed, Ruff and format check passed, strict Mypy
+  passed, and branch coverage was 87.17% against the 85% threshold.
+- [x] Real Provider minimum capability check observed HTTP 200 `text/event-stream`, multiple deltas,
+  `[DONE]`, usage, no fallback, and `started → first_byte → completed`.
+- [x] Reran Ruff, format check, strict Mypy, full tests, and coverage against the final v1.3
+  checkout; the final numbers are recorded in `docs/ACCEPTANCE.md`.
+- [x] Ran the deterministic 30-case evaluation against v1.3 and recorded its report/hash without
+  rewriting historical v1.2 metrics.
+- [x] Source-diverse Top-K prevents overlapping chunks from one file monopolizing evidence slots;
+  the final deterministic run reached task success 1.0 and Recall@5 1.0 without changing labels.
+- [x] Ran the four-role real Provider no-fallback acceptance with temporary SQLite; verified provider
+  health, planner → researcher → reviewer → writer, lifecycle events, evidence/citations, final
+  checkpoint, and absence of secret/content leakage.
+- [x] Ran a broader multi-file goal; it persisted accepted evidence but honestly terminated
+  `guarded` at the review limit instead of coercing an unresolved gap into success.
+- [x] Built wheel/sdist twice, ran `scripts/check_release.py`, inspected artifact contents for secrets,
+  and recorded only observed v1.3 sizes and SHA-256 values. The checker independently opens both
+  archives, require exactly one wheel and one sdist, reject unsafe/link/credential-like members, and
+  verify package Name/Version metadata rather than trusting the manifest alone.
+- [x] Built and smoked hardened Docker/Compose as non-root; `/ready`, rootfs/capability/security
+  options, writable-data-only permissions, clean CLI startup, and absence of embedded credentials
+  passed. API/SSE/resume behavior remains covered by the packaged integration suite.
+- [x] CI runs the release build/check twice, clean-wheel install smoke, redacted tracked-source secret
+  scan, Docker/Compose validation, and a hardened container smoke under read-only-rootfs,
+  dropped-capability, no-new-privileges constraints.
+- [x] Package metadata, OpenAPI version, MCP server version, Provider User-Agent, changelog, README,
+  architecture, product spec, and configuration example identify v1.3 consistently.
+
+## v1.3 measurement policy
+
+- [x] Deterministic evaluation is labeled as workflow/retrieval regression, not live-model quality or
+  production throughput.
+- [x] A real Provider run without a fixed labeled dataset and load methodology is labeled interface
+  and state-machine acceptance only.
+- [x] Citation validity remains distinct from claim entailment; unavailable labeled claim/reviewer
+  metrics remain `evaluated=false`/`null` rather than being replaced by proxy metrics.
+- [x] No TTFT, single-request latency, task status, or fallback-free run is advertised as a capacity,
+  cost, accuracy, or SLO result.
+
+## v1.3 freeze procedure
+
+The v1.3 freeze ran code/evaluation/real-Provider gates first, then built into empty output
+directories with
+`python scripts/build_release.py --out-dir release` and verified with
+`python scripts/check_release.py release`. Keep manifest and `SHA256SUMS` outside the artifacts;
+the observed artifact sizes, hashes, image digest, and smoke observations are recorded in
+`docs/ACCEPTANCE.md`. Historical v1.2 entries below remain immutable.
+
+---
+
+# RepoPilot v1.2 Historical Release Gates
 
 `v1.0.0` remains the historical baseline and `v1.1.0` remains the last frozen measured release.
-`v1.2.0` is frozen only when every required gate below passes against the packaged source.
+`v1.2.0` was frozen only after every required gate below passed against the packaged source.
 Checkboxes must reflect command output or an inspectable test; they are not product claims by
 themselves.
 
@@ -52,6 +168,8 @@ themselves.
   execution budgets are tested.
 - [x] Path traversal, symlink escape, oversized upload, prompt injection, and secret-redaction tests
   pass.
+- [x] Explicit-file ingestion uses the same allowlist as directory walks and rejects symlinks,
+  VCS/config directories, credential-like files, private-key formats, and unsupported suffixes.
 - [x] No API key exists in source, `.env`, fixtures, commands, logs, traces, reports, or built
   artifacts; exception chains are redacted before log handlers.
 - [x] Deterministic mode completes the same workflow while the live model endpoint is unavailable.

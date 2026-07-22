@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 from http import HTTPStatus
 from pathlib import Path
 from time import perf_counter
@@ -29,8 +30,6 @@ from .storage.models import (
 )
 from .storage.repositories import DocumentStore, EvidenceStore, MemoryStore, TaskStore
 from .workflow import ResearchWorkflow
-
-STREAM_POLL_SECONDS = 0.2
 
 
 class AuthenticationError(RepoPilotError):
@@ -139,6 +138,7 @@ class TaskEventResponse(BaseModel):
     sequence: int
     event_type: str
     payload: dict[str, Any]
+    created_at: datetime
 
     @classmethod
     def from_record(cls, record: TaskEventRecord) -> TaskEventResponse:
@@ -146,6 +146,7 @@ class TaskEventResponse(BaseModel):
             sequence=record.sequence,
             event_type=record.event_type,
             payload=record.payload_json,
+            created_at=record.created_at,
         )
 
 
@@ -177,7 +178,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await provider.close()
             await database.close()
 
-    app = FastAPI(title="RepoPilot", version="1.2.0", lifespan=lifespan)
+    app = FastAPI(title="RepoPilot", version="1.3.0", lifespan=lifespan)
 
     @app.middleware("http")
     async def observe_requests(request: Request, call_next: Any) -> Any:
@@ -388,6 +389,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         async def event_stream(start: int) -> AsyncIterator[str]:
             position = start
+            last_delivery = perf_counter()
             while True:
                 events = await service.store.list_events(task_id, after_sequence=position)
                 for event in events:
@@ -397,10 +399,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "sequence": event.sequence,
                             "event_type": event.event_type,
                             "payload": event.payload_json,
+                            "created_at": event.created_at.isoformat(),
                         },
                         ensure_ascii=False,
                     )
                     yield f"id: {event.sequence}\nevent: {event.event_type}\ndata: {payload}\n\n"
+                    last_delivery = perf_counter()
                 record = await service.get_task(task_id)
                 if record.status in TERMINAL_STATUSES and not service.is_running(task_id):
                     remaining = await service.store.list_events(task_id, after_sequence=position)
@@ -408,12 +412,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         yield "event: stream.end\ndata: {}\n\n"
                         return
                     continue
-                await asyncio.sleep(STREAM_POLL_SECONDS)
+                if perf_counter() - last_delivery >= app_settings.sse_heartbeat_seconds:
+                    # A transport heartbeat proves only that RepoPilot and the SSE connection are
+                    # alive. Provider progress is persisted separately as provider.request.*.
+                    yield ": keep-alive\n\n"
+                    last_delivery = perf_counter()
+                await asyncio.sleep(app_settings.sse_poll_seconds)
 
         return StreamingResponse(
             event_stream(cursor),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
     return app

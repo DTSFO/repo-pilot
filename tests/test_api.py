@@ -8,8 +8,11 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 
+import repopilot.api as api_module
 from repopilot.api import create_app
 from repopilot.config import Settings
+from repopilot.models import AgentRunResult
+from repopilot.providers.telemetry import ProviderEvent, emit_provider_event
 
 
 def make_settings(tmp_path: Path, **overrides: object) -> Settings:
@@ -120,6 +123,64 @@ async def test_sse_last_event_id_replays_only_newer_events(
     assert ids == [int(event["sequence"]) for event in events if int(event["sequence"]) > cursor]
 
 
+async def test_sse_emits_live_provider_events_and_transport_heartbeat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SlowTelemetryWorkflow:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def run(self, goal: str, **kwargs: object) -> AgentRunResult:
+            del kwargs
+            common = {
+                "call_id": "live-call",
+                "provider": "test-provider",
+                "model": "test-model",
+                "purpose": "planner",
+            }
+            await emit_provider_event(ProviderEvent("started", elapsed_ms=0.0, **common))
+            await asyncio.sleep(0.03)
+            await emit_provider_event(
+                ProviderEvent(
+                    "progress",
+                    elapsed_ms=30.0,
+                    metadata={"state": "waiting_first_byte"},
+                    **common,
+                )
+            )
+            await asyncio.sleep(0.03)
+            await emit_provider_event(ProviderEvent("completed", elapsed_ms=60.0, **common))
+            return AgentRunResult(
+                "done",
+                ({"role": "user", "content": goal},),
+                (),
+                1,
+                "completed",
+            )
+
+    monkeypatch.setattr(api_module, "ResearchWorkflow", SlowTelemetryWorkflow)
+    app = create_app(make_settings(tmp_path, sse_poll_seconds=0.01, sse_heartbeat_seconds=0.01))
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            task_id = (await http.post("/api/tasks", json={"goal": "observe live"})).json()["id"]
+            lines: list[str] = []
+            async with http.stream("GET", f"/api/tasks/{task_id}/stream") as response:
+                assert response.headers["cache-control"] == "no-cache, no-transform"
+                async for line in response.aiter_lines():
+                    lines.append(line)
+                    if line == "event: stream.end":
+                        break
+            persisted = (await http.get(f"/api/tasks/{task_id}/events")).json()
+
+    assert "event: provider.request.started" in lines
+    assert "event: provider.request.progress" in lines
+    assert "event: provider.request.completed" in lines
+    assert ": keep-alive" in lines
+    assert all(event["event_type"] != "stream.heartbeat" for event in persisted)
+
+
 async def test_api_token_is_enforced(tmp_path: Path) -> None:
     app = create_app(make_settings(tmp_path, api_token="secret-token"))
     async with LifespanManager(app):
@@ -135,6 +196,36 @@ async def test_api_token_is_enforced(tmp_path: Path) -> None:
                 headers={"Authorization": "Bearer secret-token"},
             )
             assert allowed.status_code == 202
+
+
+async def test_bearer_header_authorizes_fetch_based_task_stream(tmp_path: Path) -> None:
+    app = create_app(make_settings(tmp_path, api_token="secret-token"))
+    authorization = {"Authorization": "Bearer secret-token"}
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            denied = await http.get("/api/tasks/missing/stream")
+            assert denied.status_code == 401
+
+            task_id = (
+                await http.post(
+                    "/api/tasks",
+                    json={"goal": "authenticated stream"},
+                    headers=authorization,
+                )
+            ).json()["id"]
+            await app.state.service.wait_for_task(task_id)
+
+            async with http.stream(
+                "GET",
+                f"/api/tasks/{task_id}/stream",
+                headers={**authorization, "Accept": "text/event-stream"},
+            ) as response:
+                body = (await response.aread()).decode()
+
+    assert response.status_code == 200
+    assert "event: task.completed" in body
+    assert "event: stream.end" in body
 
 
 async def test_resume_rejected_for_completed_task(client: httpx.AsyncClient) -> None:
@@ -154,6 +245,22 @@ async def test_metrics_and_index_page(client: httpx.AsyncClient) -> None:
     metrics = await client.get("/metrics")
     assert metrics.status_code == 200
     assert "repopilot_http_requests_total" in metrics.text
+
+
+async def test_index_uses_dom_safe_rendering_and_memory_only_bearer_stream(
+    client: httpx.AsyncClient,
+) -> None:
+    html = (await client.get("/")).text
+
+    assert "innerHTML" not in html
+    assert "new EventSource" not in html
+    assert "localStorage" not in html
+    assert "sessionStorage" not in html
+    assert "headers.set('Authorization'" in html
+    assert "document.createElement('code')" in html
+    assert "citation.textContent" in html
+    assert "replaceChildren" in html
+    assert "consumeTaskStream" in html
 
 
 async def test_upload_document_ingests_and_searches(client: httpx.AsyncClient) -> None:

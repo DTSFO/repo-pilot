@@ -1,4 +1,4 @@
-# RepoPilot v1.2 Product Specification
+# RepoPilot v1.3 Product Specification
 
 ## Product statement
 
@@ -22,14 +22,18 @@ or provider-independent model quality.
    report rather than fabricated synthesis.
 6. Deterministic and live-provider modes execute the same compiled LangGraph and persistence contract.
 7. Provider fallback is visible as `degraded=true`; it never impersonates the configured live model.
-8. Every loop, retry, tool call, model step, timeout, and Token budget is finite.
+8. Provider lifecycle persistence is content-free and allowlisted; prompts, completions, keys, URLs,
+   response IDs, raw errors, token deltas, and tool arguments are excluded.
+9. Tool and Token budgets are task-global across all revision rounds; a revision never resets them.
+10. Every loop, retry, tool call, model step, timeout, and Token budget is finite.
 
 ## Primary user journeys
 
 1. Add a local repository or upload a supported UTF-8 text document.
 2. Index source into content-versioned documents and line-addressable chunks.
 3. Create a research task with a goal, constraints, and optional budget.
-4. Watch Planner, Researcher, Reviewer, bounded revision, and Writer events over SSE.
+4. Watch Planner, Researcher, Reviewer, bounded revision, Writer, and content-free Provider
+   lifecycle events over task SSE.
 5. Inspect plan, tool calls, accepted/rejected evidence, citations, timings, degraded reasons, and
    final report.
 6. Resume an interrupted task from its latest node/round WorkflowState checkpoint.
@@ -50,7 +54,10 @@ or provider-independent model quality.
 - Tool arguments use explicit JSON Schema and fail closed for unknown tools or invalid input.
 - Deterministic hard review validates corpus freshness, deduplication, score, coverage, and citation.
 - Live-model Reviewer evaluates relevance/entailment only inside the hard-gate candidate set.
-- Reviewer may request additional queries for at most `max_review_rounds` extra rounds.
+- Reviewer receives completion requirements and executed-query history; it may request at most two
+  novel additional queries per round and must identify missing requirements.
+- Revision stops on no novel query, no evidence increment, global budget exhaustion, or
+  `max_review_rounds`; these terminal guard conditions are not reported as normal completion.
 - Writer receives only accepted evidence; invalid citations trigger evidence-only degradation.
 - No accepted evidence skips model writing and returns an explicit refusal.
 
@@ -58,15 +65,25 @@ or provider-independent model quality.
 
 - Provider-neutral asynchronous model client with deterministic offline mode.
 - OpenAI-compatible Provider configured only through environment variables.
-- Bounded retry/backoff, timeout, circuit breaker, and fallback provenance.
+- Buffered upstream Provider SSE by default: merge/validate text, fragmented tool calls, finish
+  reason, served model, and usage before exposing one complete `ModelResponse` to a role.
+- Independent streaming and `stream_options.include_usage` compatibility switches.
+- Bounded retry/backoff, connect/read/write/pool timeouts, circuit breaker, and fallback provenance.
+- Content-free Provider lifecycle events for started, first byte, periodic progress, retry, timeout,
+  failure, cancellation, and completion; TTFT and terminal latency metrics.
+- Missing Provider usage is conservatively estimated, explicitly marked, and used only for budget
+  accounting rather than represented as official billing data.
 - Concurrent execution only for same-turn tools whose registered specs are all read-only.
-- Step/tool/Token budgets, duplicate-call detection, cancellation, and structured errors.
+- Step/tool/Token budgets, duplicate-call detection, cancellation, and structured errors; tool and
+  Token counters remain cumulative across Researcher revisions.
 - Full WorkflowState checkpoints and node/round resume without duplicate Evidence rows.
 - SQLAlchemy TaskStore is the only durable checkpoint authority; no second LangGraph saver or
   dual-write recovery path is used.
 - Durable tasks, events, checkpoints, documents, chunks, evidence, memories, and evaluation runs.
-- REST API, SQLite short-polling SSE replay with `Last-Event-ID`, health/readiness endpoints, and
-  Prometheus metrics.
+- REST API, configurable SQLite short-polling SSE replay with `Last-Event-ID`, unnumbered transport
+  heartbeat, health/readiness endpoints, and Prometheus metrics.
+- Same-task event sequence serialization is guaranteed inside one RepoPilot process with bounded
+  uniqueness retry; multi-process/multi-replica fan-out is outside the product contract.
 
 ### Repository evidence
 
@@ -96,14 +113,19 @@ or provider-independent model quality.
 - Formal proof that every natural-language conclusion is correct.
 - Fabricated production traffic, DAU, throughput, revenue, accuracy, or cost claims.
 - Mandatory dependence on a model vendor, live API, vector database, Redis, or frontend framework
-  during tests. LangGraph is an intentional runtime dependency in v1.2, while deterministic tests
+  during tests. LangGraph is an intentional runtime dependency in v1.3, while deterministic tests
   remain independent of an external model service.
+- Direct token streaming of partial Planner/Reviewer JSON or unvalidated Writer drafts to users.
+- Exactly-once Provider execution, replay of in-flight HTTP requests, or lifecycle-event completion
+  guarantees across process crashes.
 
 ## Release policy
 
-`v1.0.0` remains a frozen historical release and its recorded baseline is not rewritten. `v1.1.0`
-is the measured agentic baseline. `v1.2.0` changes the default orchestration implementation to a
-real LangGraph StateGraph without weakening the evidence/API contracts. Its release gate must rerun
-tests and the deterministic 30-case evaluation. The v1.2 checkout has passed code, evaluation,
-browser, package, Docker, Compose, persistence, resume, SSE, and degraded-state gates; measured
-deterministic quality remains explicitly separate from live-provider quality or production capacity.
+`v1.0.0`, `v1.1.0`, and `v1.2.0` remain frozen historical releases; their measured results and
+artifact hashes are never rewritten. `v1.3.0` adds buffered upstream SSE, Provider lifecycle
+telemetry, task-global budget enforcement, and Reviewer novelty/stagnation convergence without
+weakening the LangGraph/evidence/API contracts. A v1.3 freeze requires fresh code checks, the same
+deterministic 30-case regression, a real-provider no-fallback state-machine acceptance run,
+artifact/secret inspection, and container smoke tests. A real endpoint run demonstrates interface
+and workflow compatibility only unless it uses a labeled dataset and documented load methodology;
+it is not model-quality, throughput, capacity, or cost evidence.

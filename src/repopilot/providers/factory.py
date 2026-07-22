@@ -25,7 +25,13 @@ def build_provider(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
         model=settings.llm_model,
-        timeout_seconds=settings.llm_timeout_seconds,
+        connect_timeout_seconds=settings.resolved_llm_connect_timeout_seconds,
+        read_timeout_seconds=settings.resolved_llm_read_timeout_seconds,
+        write_timeout_seconds=settings.resolved_llm_write_timeout_seconds,
+        pool_timeout_seconds=settings.resolved_llm_pool_timeout_seconds,
+        streaming_enabled=settings.llm_streaming_enabled,
+        stream_include_usage=settings.llm_stream_include_usage,
+        stream_progress_interval_seconds=settings.llm_stream_progress_interval_seconds,
         transport=transport,
     )
     return ResilientProvider(

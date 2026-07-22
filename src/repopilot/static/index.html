@@ -79,29 +79,87 @@
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
-let currentTask = null, source = null;
+const TASK_STATUS_CLASSES = new Set(['pending','running','completed','guarded','failed','cancelled']);
+let currentTask = null, streamController = null, apiToken = null;
 
-async function api(path, options) {
-  const response = await fetch(path, options);
-  if (!response.ok) throw new Error((await response.json()).error?.message || response.status);
+function requestApiToken() {
+  const supplied = window.prompt('RepoPilot API Token（仅保存在当前页面内存）');
+  if (supplied === null || !supplied.trim()) return false;
+  apiToken = supplied.trim();
+  return true;
+}
+
+async function request(path, options = {}, allowTokenPrompt = true) {
+  const headers = new Headers(options.headers || {});
+  if (apiToken) headers.set('Authorization', `Bearer ${apiToken}`);
+  const response = await fetch(path, {...options, headers});
+  if (response.status === 401 && allowTokenPrompt && requestApiToken())
+    return request(path, options, false);
+  return response;
+}
+
+async function responseError(response) {
+  try {
+    const payload = await response.json();
+    return payload.error?.message || String(response.status);
+  } catch (_) {
+    return String(response.status);
+  }
+}
+
+async function api(path, options = {}) {
+  const response = await request(path, options);
+  if (!response.ok) throw new Error(await responseError(response));
   return response.json();
 }
 
 async function refreshTasks() {
   const tasks = await api('/api/tasks');
-  $('tasks').innerHTML = tasks.map(t =>
-    `<li data-id="${t.id}" class="${t.id === currentTask ? 'active' : ''}">
-       <div class="goal">${t.goal.replace(/</g,'&lt;')}</div>
-       <span class="status ${t.status}">${t.status}${t.degraded ? ' · degraded' : ''}</span>
-     </li>`).join('');
-  for (const li of $('tasks').querySelectorAll('li'))
+  const fragment = document.createDocumentFragment();
+  for (const task of tasks) {
+    const li = document.createElement('li');
+    li.dataset.id = String(task.id);
+    if (task.id === currentTask) li.classList.add('active');
+
+    const goal = document.createElement('div');
+    goal.classList.add('goal');
+    goal.textContent = String(task.goal);
+
+    const status = document.createElement('span');
+    status.classList.add('status');
+    if (TASK_STATUS_CLASSES.has(task.status)) status.classList.add(task.status);
+    status.textContent = `${String(task.status)}${task.degraded ? ' · degraded' : ''}`;
+
+    li.append(goal, status);
     li.onclick = () => selectTask(li.dataset.id);
+    fragment.append(li);
+  }
+  $('tasks').replaceChildren(fragment);
 }
 
 function renderEvidence(evidence) {
-  $('evidence').innerHTML = evidence.length ? evidence.map(e =>
-    `<div class="${e.review_status}"><code>${e.citation}</code> · score ${e.score.toFixed(3)} · ${e.review_status}<br>${e.quote.slice(0,160).replace(/</g,'&lt;')}</div>`
-  ).join('') : '—';
+  const container = $('evidence');
+  if (!evidence.length) {
+    container.textContent = '—';
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const item of evidence) {
+    const block = document.createElement('div');
+    if (item.review_status === 'rejected') block.classList.add('rejected');
+
+    const citation = document.createElement('code');
+    citation.textContent = String(item.citation);
+    const score = Number(item.score);
+    const summary = document.createTextNode(
+      ` · score ${Number.isFinite(score) ? score.toFixed(3) : 'n/a'} · ${String(item.review_status)}`
+    );
+    const quote = document.createElement('span');
+    quote.textContent = String(item.quote).slice(0, 160);
+    block.append(citation, summary, document.createElement('br'), quote);
+    fragment.append(block);
+  }
+  container.replaceChildren(fragment);
 }
 
 async function selectTask(id) {
@@ -116,21 +174,121 @@ async function selectTask(id) {
 }
 
 function follow(id) {
-  if (source) source.close();
+  if (streamController) streamController.abort();
   $('events').textContent = '';
-  source = new EventSource(`/api/tasks/${id}/stream`);
-  source.onmessage = () => {};
-  const log = (ev) => {
-    $('events').textContent += ev.type + '\n';
-    $('events').scrollTop = $('events').scrollHeight;
+  const controller = new AbortController();
+  streamController = controller;
+  void streamTask(id, controller).catch((error) => {
+    if (!controller.signal.aborted && currentTask === id)
+      appendEventLabel(`stream error: ${error.message}`);
+  });
+}
+
+function appendEventLabel(label) {
+  $('events').textContent += String(label) + '\n';
+  $('events').scrollTop = $('events').scrollHeight;
+}
+
+function logTaskEvent(type, data) {
+  let label = type;
+  if (type.startsWith('provider.request.')) {
+    try {
+      const event = JSON.parse(data);
+      const payload = event.payload || {};
+      const role = payload.purpose || 'model';
+      const seconds = Number(payload.elapsed_ms || 0) / 1000;
+      const phase = type.replace('provider.request.', '');
+      const descriptions = {
+        started: 'request started',
+        first_byte: `first byte after ${seconds.toFixed(1)}s`,
+        progress: payload.state === 'receiving'
+          ? `receiving response · ${seconds.toFixed(1)}s`
+          : `waiting for first byte · ${seconds.toFixed(1)}s`,
+        retry: `retry scheduled · attempt ${payload.attempt || '?'}`,
+        completed: `completed · ${seconds.toFixed(1)}s`,
+        timeout: `${payload.timeout_phase || 'request'} timeout`,
+        failed: 'request failed',
+        cancelled: 'request cancelled'
+      };
+      label = `${role}: ${descriptions[phase] || phase}`;
+    } catch (_) {}
+  }
+  appendEventLabel(label);
+}
+
+function handleTaskEvent(id, type, data) {
+  logTaskEvent(type, data);
+  if (type.startsWith('task.') || type === 'stream.end') void selectTaskSilently(id);
+  return type === 'stream.end';
+}
+
+async function consumeTaskStream(response, id, cursor) {
+  if (!response.body) throw new Error('Streaming response body is unavailable.');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '', eventType = 'message', eventId = '', dataLines = [];
+
+  const dispatch = () => {
+    if (!dataLines.length) {
+      eventType = 'message';
+      eventId = '';
+      return false;
+    }
+    const terminal = handleTaskEvent(id, eventType || 'message', dataLines.join('\n'));
+    if (/^\d+$/.test(eventId)) cursor.value = Number(eventId);
+    eventType = 'message';
+    eventId = '';
+    dataLines = [];
+    return terminal;
   };
-  for (const type of ['task.started','trace.workflow','trace.retrieval','trace.model','trace.tool',
-                      'task.completed','task.failed','task.cancelled','task.resumed','stream.end'])
-    source.addEventListener(type, (ev) => {
-      log(ev);
-      if (type.startsWith('task.') || type === 'stream.end') selectTaskSilently(id);
-      if (type === 'stream.end') source.close();
-    });
+
+  while (true) {
+    const {value, done} = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), {stream: !done});
+    let newline;
+    while ((newline = buffer.indexOf('\n')) >= 0) {
+      let line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      if (line.endsWith('\r')) line = line.slice(0, -1);
+      if (!line) {
+        if (dispatch()) {
+          await reader.cancel();
+          return true;
+        }
+        continue;
+      }
+      if (line.startsWith(':')) continue;
+      const separator = line.indexOf(':');
+      const field = separator < 0 ? line : line.slice(0, separator);
+      let fieldValue = separator < 0 ? '' : line.slice(separator + 1);
+      if (fieldValue.startsWith(' ')) fieldValue = fieldValue.slice(1);
+      if (field === 'event') eventType = fieldValue;
+      else if (field === 'id') eventId = fieldValue;
+      else if (field === 'data') dataLines.push(fieldValue);
+    }
+    if (done) {
+      if (buffer) dataLines.push(buffer);
+      return dispatch();
+    }
+  }
+}
+
+async function streamTask(id, controller) {
+  const cursor = {value: 0};
+  while (!controller.signal.aborted && currentTask === id) {
+    const suffix = cursor.value ? `?after=${encodeURIComponent(cursor.value)}` : '';
+    try {
+      const response = await request(`/api/tasks/${id}/stream${suffix}`, {
+        headers: {'Accept': 'text/event-stream'}, signal: controller.signal
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      if (await consumeTaskStream(response, id, cursor)) return;
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      appendEventLabel(`stream reconnecting: ${error.message}`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
 }
 
 async function selectTaskSilently(id) {
@@ -166,7 +324,7 @@ $('ingest').onclick = async () => {
   } finally { $('ingest').disabled = false; }
 };
 
-refreshTasks();
+void refreshTasks().catch(error => appendEventLabel(`API error: ${error.message}`));
 </script>
 </body>
 </html>

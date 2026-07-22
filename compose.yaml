@@ -1,8 +1,9 @@
 services:
   repopilot:
+    image: ${REPOPILOT_IMAGE:-repopilot:local}
     build: .
     ports:
-      - "8000:8000"
+      - "${REPOPILOT_PORT:-8000}:8000"
     environment:
       REPOPILOT_PROVIDER: ${REPOPILOT_PROVIDER:-deterministic}
       REPOPILOT_LLM_BASE_URL: ${REPOPILOT_LLM_BASE_URL:-}
@@ -12,5 +13,14 @@ services:
     volumes:
       - repopilot-data:/app/data
       - ${REPOPILOT_WORKSPACE:-.}:/workspace:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    pids_limit: 256
 volumes:
   repopilot-data:

@@ -35,6 +35,32 @@ class SettingsTest(unittest.TestCase):
             frozenset({"example.com", "docs.example.com"}),
         )
 
+    def test_streaming_and_granular_llm_timeout_defaults(self) -> None:
+        settings = Settings(_env_file=None)
+
+        self.assertTrue(settings.llm_streaming_enabled)
+        self.assertTrue(settings.llm_stream_include_usage)
+        self.assertEqual(settings.resolved_llm_connect_timeout_seconds, 10.0)
+        self.assertEqual(settings.resolved_llm_read_timeout_seconds, 120.0)
+        self.assertEqual(settings.resolved_llm_write_timeout_seconds, 30.0)
+        self.assertEqual(settings.resolved_llm_pool_timeout_seconds, 10.0)
+        self.assertEqual(settings.sse_poll_seconds, 0.2)
+        self.assertEqual(settings.sse_heartbeat_seconds, 15.0)
+
+    def test_legacy_aggregate_timeout_and_granular_override_are_supported(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            llm_timeout_seconds=15,
+            llm_read_timeout_seconds=90,
+            llm_streaming_enabled=False,
+        )
+
+        self.assertEqual(settings.resolved_llm_connect_timeout_seconds, 15)
+        self.assertEqual(settings.resolved_llm_read_timeout_seconds, 90)
+        self.assertEqual(settings.resolved_llm_write_timeout_seconds, 15)
+        self.assertEqual(settings.resolved_llm_pool_timeout_seconds, 15)
+        self.assertFalse(settings.llm_streaming_enabled)
+
 
 if __name__ == "__main__":
     unittest.main()

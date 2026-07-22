@@ -6,7 +6,7 @@ import pytest
 
 from repopilot.config import Settings
 from repopilot.ingestion import IngestionPathError, RepositoryIngestor, chunk_lines
-from repopilot.retrieval import LexicalRetriever, tokenize
+from repopilot.retrieval import LexicalRetriever, ScoredChunk, _source_diverse_top_k, tokenize
 from repopilot.storage import Database, DocumentStore
 
 
@@ -107,6 +107,48 @@ async def test_ingest_rejects_symlink_escape(
         ingestor.resolve_safe_path("escape")
 
 
+async def test_explicit_ingest_rejects_sensitive_and_unsupported_files(
+    database: Database, workspace: Path, tmp_path: Path
+) -> None:
+    (workspace / ".env").write_text("API_KEY=must-not-index", encoding="utf-8")
+    (workspace / "secrets.json").write_text('{"token":"must-not-index"}', encoding="utf-8")
+    (workspace / "archive.bin").write_text("must-not-index", encoding="utf-8")
+    settings = make_settings(workspace, f"sqlite+aiosqlite:///{tmp_path}/ingest-test.db")
+    ingestor = RepositoryIngestor(DocumentStore(database), settings)
+
+    for relative in (".env", ".git/config", "secrets.json", "archive.bin"):
+        with pytest.raises(IngestionPathError):
+            await ingestor.ingest_path(relative)
+
+    rows = await ingestor.documents.latest_chunk_rows()
+    assert all("must-not-index" not in row.content for row in rows)
+
+
+async def test_explicit_ingest_rejects_symlink_even_when_target_stays_inside_workspace(
+    database: Database, workspace: Path, tmp_path: Path
+) -> None:
+    (workspace / "readme-link.md").symlink_to(workspace / "README.md")
+    settings = make_settings(workspace, f"sqlite+aiosqlite:///{tmp_path}/ingest-test.db")
+    ingestor = RepositoryIngestor(DocumentStore(database), settings)
+
+    with pytest.raises(IngestionPathError):
+        await ingestor.ingest_path("readme-link.md")
+
+
+async def test_explicit_ingest_uses_same_allowlist_as_directory_walk(
+    database: Database, workspace: Path, tmp_path: Path
+) -> None:
+    (workspace / ".env.example").write_text("API_KEY=replace-me", encoding="utf-8")
+    settings = make_settings(workspace, f"sqlite+aiosqlite:///{tmp_path}/ingest-test.db")
+    ingestor = RepositoryIngestor(DocumentStore(database), settings)
+
+    source_report = await ingestor.ingest_path("loop.py")
+    example_report = await ingestor.ingest_path(".env.example")
+
+    assert source_report.ingested_documents == 1
+    assert example_report.ingested_documents == 1
+
+
 async def test_reingest_after_edit_creates_new_version(
     database: Database, workspace: Path, tmp_path: Path
 ) -> None:
@@ -166,3 +208,35 @@ async def test_retriever_ranks_relevant_chunk_first(
 def test_retriever_empty_index_returns_nothing() -> None:
     retriever = LexicalRetriever([])
     assert retriever.search("anything") == []
+
+
+def test_source_diversity_prevents_one_file_from_monopolizing_top_k() -> None:
+    def hit(source: str, ordinal: int, score: float) -> ScoredChunk:
+        from repopilot.storage.repositories import ChunkRow
+
+        row = ChunkRow(
+            chunk_id=f"{source}-{ordinal}",
+            document_id=source,
+            source_uri=source,
+            title=source,
+            content="evidence",
+            ordinal=ordinal,
+            line_start=1,
+            line_end=1,
+        )
+        return ScoredChunk(row, score)
+
+    ranked = [
+        hit("tests/test_providers.py", 0, 10.0),
+        hit("tests/test_providers.py", 1, 9.9),
+        hit("tests/test_providers.py", 2, 9.8),
+        hit("src/repopilot/providers/resilient.py", 0, 8.0),
+    ]
+
+    selected = _source_diverse_top_k(ranked, 3)
+
+    assert [item.chunk.source_uri for item in selected] == [
+        "tests/test_providers.py",
+        "src/repopilot/providers/resilient.py",
+        "tests/test_providers.py",
+    ]

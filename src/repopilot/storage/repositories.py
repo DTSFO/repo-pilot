@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -7,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 
 from .database import Database
 from .models import (
@@ -26,6 +28,10 @@ class TaskStore:
 
     def __init__(self, database: Database) -> None:
         self.database = database
+        # RepoPilot currently advertises a single-process persistence model. Provider telemetry
+        # can append events concurrently with node checkpoints, so serialize sequence allocation
+        # per task inside that process instead of racing on max(sequence) + 1.
+        self._event_locks: dict[str, asyncio.Lock] = {}
 
     async def create_task(
         self,
@@ -87,22 +93,33 @@ class TaskStore:
         event_type: str,
         payload: dict[str, Any] | None = None,
     ) -> TaskEventRecord:
-        async with self.database.session() as session:
-            task = await session.get(ResearchTaskRecord, task_id)
-            if task is None:
-                raise KeyError(task_id)
-            last_sequence = await session.scalar(
-                select(func.max(TaskEventRecord.sequence)).where(TaskEventRecord.task_id == task_id)
-            )
-            event = TaskEventRecord(
-                task_id=task_id,
-                sequence=(last_sequence or 0) + 1,
-                event_type=event_type,
-                payload_json=payload or {},
-            )
-            session.add(event)
-            await session.flush()
-            return event
+        lock = self._event_locks.setdefault(task_id, asyncio.Lock())
+        async with lock:
+            for attempt in range(3):
+                try:
+                    async with self.database.session() as session:
+                        task = await session.get(ResearchTaskRecord, task_id)
+                        if task is None:
+                            raise KeyError(task_id)
+                        last_sequence = await session.scalar(
+                            select(func.max(TaskEventRecord.sequence)).where(
+                                TaskEventRecord.task_id == task_id
+                            )
+                        )
+                        event = TaskEventRecord(
+                            task_id=task_id,
+                            sequence=(last_sequence or 0) + 1,
+                            event_type=event_type,
+                            payload_json=payload or {},
+                        )
+                        session.add(event)
+                        await session.flush()
+                    return event
+                except IntegrityError:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(0)
+        raise RuntimeError("event sequence allocation exhausted")
 
     async def list_events(
         self,

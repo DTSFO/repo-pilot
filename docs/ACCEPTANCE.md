@@ -1,6 +1,107 @@
 # RepoPilot 验收记录
 
+## v1.3.0 冻结验收状态
+
+日期：2026-07-22 · 范围：Provider 可诊断流式调用、Reviewer 收敛控制、任务全局预算与
+单进程持久事件一致性
+
+v1.3 已在最终候选上完成代码、deterministic 评测、真实 Provider、发行包和 hardened
+Docker/Compose 门禁。下方 v1.2.0 及更早版本是历史记录，其产物大小、SHA-256、镜像摘要和
+评测数字保持原样。
+
+| 检查 | v1.3 当前实际结果 |
+| --- | --- |
+| 单元/集成/API/发布测试 | 164 passed |
+| 静态与类型 | Ruff、format check、strict Mypy 全部通过 |
+| 分支覆盖率 | 87.17%，超过 85% 门槛 |
+| Provider 最小真实 SSE | HTTP 200 `text/event-stream`；多次 delta + `[DONE]`；usage 可返回；`fallback=false` |
+| Provider 最小生命周期 | `started → first_byte → completed`；该次 TTFT 约 1.87s、总耗时约 2.79s |
+| v1.3 deterministic 30-case 回归 | task success 1.0；Recall@5 1.0；citation validity/precision 1.0；refusal accuracy 1.0；degraded/fallback 0；P95 648.53ms |
+| 四角色真实 API 窄目标 | `planner → researcher → reviewer → writer`；4 calls；`completed`；`degraded=false`；fallback 0；1 条 accepted evidence；引用/final checkpoint/secret-safety 全通过 |
+| 开放多文件真实目标 | 3 轮 Researcher/Reviewer；7 条 accepted evidence；fallback 0；未覆盖项在上限内未收敛，诚实 `guarded`，原因含 `review_limit_reached` |
+| v1.3 wheel/sdist 与 Docker/Compose | 双构建逐字节一致、独立 archive/metadata/secret 校验、clean wheel 安装和 hardened container smoke 全通过；最终哈希见下表 |
+
+### v1.3 已实现且必须保持的行为
+
+- OpenAI-compatible 请求默认使用上游 `stream=true`。Provider 内部缓冲并合并文本、分片
+  tool calls、finish reason、served model 与 usage，完整校验后返回单一 `ModelResponse`；
+  Planner/Reviewer JSON 碎片和未验证 Writer 草稿不会作为任务输出流出。
+- Provider 同时兼容“请求流式但端点返回普通 JSON”。`streaming_enabled` 与
+  `stream_options.include_usage` 可独立关闭，以兼容不同 OpenAI-compatible 端点。
+- connect/read/write/pool 使用独立超时；每个逻辑调用持久化 content-free 的
+  `started`、`first_byte`、`progress`、`retry` 和 terminal 时间线。`progress` 区分
+  `waiting_first_byte` 与 `receiving`，Prometheus 记录 TTFT、终态延迟和 telemetry drop。
+- Provider telemetry 在写 TaskStore 前通过显式 allowlist；不得持久化 URL、Key、prompt、
+  completion/content、token delta、response ID、原始异常文本或 tool arguments。sink 失败只
+  增加 dropped counter 和安全日志，不改变推理结果。
+- Provider 未返回 usage 时使用保守字符估算，并在事件中标记
+  `usage_reported=false`、`usage_estimated=true`。估算只用于预算保护，不能当成官方计费量。
+- Tool 与 Token 预算在同一任务的全部 Researcher/Reviewer/Writer 回合中累计；预算耗尽会
+  阻止后续调用并记录 `tool_budget_exhausted` 或 `token_budget_exhausted`。
+- Reviewer 输入包含 completion criteria、executed queries 和 candidates。代码控制器对
+  additional queries 做 fingerprint 去重、每轮最多接受 2 条，并在缺失返工理由、重复查询、
+  返工后无新增候选或达到上限时停止循环。
+- `degraded` 与 `guarded` 是不同语义：fallback、协议异常或能力降低设置
+  `degraded=true`，任务仍可能 `completed`；返工上限、停滞或任务全局预算耗尽使工作流以
+  `guarded` 终止，不把未满足要求包装成普通成功。报告列出 Reviewer 指明的未覆盖要求。
+- Provider progress 是带 sequence 的持久化 task event。SSE `: keep-alive` 是无 ID、非
+  持久化 transport comment，只证明 RepoPilot 与客户端连接存活。两者不可互相替代。
+- Provider ticker 与节点 checkpoint 可并发写事件；同任务 sequence 在一个 RepoPilot 进程
+  内以锁和有限唯一键重试保持连续。该语义不延伸到多进程/多副本 pub/sub。
+- Checkpoint 仍是已提交节点/轮次恢复。Provider 生命周期只是诊断时间线；崩溃可能留下无
+  terminal event 的旧 `call_id`，恢复会发起新调用，不宣称 in-flight replay 或 exactly-once。
+- 同任务 resume/cancel 的检查与 runner 发布由任务级进程内锁串行化；并发 resume 只能有一个
+  成功占用执行权。该保证不扩展为跨进程分布式租约。
+- 半开熔断探针被取消时释放单探针许可但不伪造成功；若在 retry backoff 期间取消，由 resilient
+  wrapper 写入 `cancelled` terminal 事件并继续传播 `CancelledError`。
+- 显式文件摄取与目录扫描共享同一 allowlist，拒绝符号链接、VCS/凭证目录、credential-like
+  文件、私钥格式和不支持的后缀；BM25/哈希语义融合的 Top-K 先覆盖不同来源再按分数回填。
+- 发布校验器不信任 manifest 自证：它独立打开 wheel/sdist，要求各一个，拒绝路径穿越、链接、
+  禁止文件名和高置信密钥模式，并核对 wheel `METADATA` 与 sdist `PKG-INFO` 的 Name/Version。
+- Docker 镜像中的应用和虚拟环境由 root 持有，运行用户保持非 root，只有 `/app/data` 可写；
+  Compose 进一步启用只读根文件系统、`/tmp` tmpfs、丢弃全部 capabilities 和
+  `no-new-privileges`。基础镜像 tag 同时固定到实际解析的 digest。
+
+### v1.3 指标与真实 API 口径
+
+deterministic 评测用于发现工作流、检索、引用和拒答回归，不代表真实模型质量或线上吞吐。
+真实 API 完整流程只证明指定日期、模型和配置下的接口兼容、生命周期、状态机、fallback
+传播、证据与引用契约。除非另有固定带标签数据集、并发模型、预热策略和负载方法，不得把
+单次 TTFT、总耗时、`completed` 或 `degraded=false` 写成质量、容量或生产 SLO。
+
+2026-07-22 最终真实 Provider 验收使用配置模型 `grok-4.5`（实际响应模型
+`grok-4.5-build-free`）、`max_steps=1`、临时 SQLite 和单文件窄目标。Planner、Researcher、
+Reviewer、Writer 各完成 1 次上游 SSE 调用；每次均观察到 `started → first_byte → completed`，
+TTFT 为约 1.18–1.48s，四次 `fallback_used=false`。任务以 `completed`、`degraded=false` 结束，
+1 条 accepted evidence、最终引用、`final` checkpoint 与 URL/Key 不落库检查全部通过。另两个
+覆盖要求更宽的目标在 Reviewer 仍要求补证时分别诚实进入 `guarded`，未被包装成普通成功。
+
+### v1.3 deterministic 评测产物
+
+- report：`evals/report.json`
+- schema：`1.1`
+- dataset fingerprint：`d151f0b1db9161797313733e9bf255e44163a5d9bec425caac23d128e8cc24dc`
+- report SHA-256：`3f9031e005b5d2896a7d91122ecb076e1cbdf39fecbedbe4891fdd9727da7bcb`
+
+### v1.3 发布产物与容器
+
+最终共享树在两个独立临时目录连续构建，wheel/sdist 逐字节一致；两个目录均通过
+`scripts/check_release.py` 的 archive、metadata、危险成员、secret pattern、manifest 和
+checksum 独立校验。clean venv 安装 wheel 后，CLI 与安装版本 `1.3.0` smoke 通过。
+
+| 产物 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `repo_pilot-1.3.0-py3-none-any.whl` | 84,031 | `a65e26cf1c219818d9117c7f1c61c0324644ec0d97a3db787c4de1d0b6f2ccb5` |
+| `repo_pilot-1.3.0.tar.gz` | 229,870 | `0b347fb8ed33fe2f1f3077494a2e4235dd907fccda212c3823e29657b8a11c56` |
+
+最终本地镜像 `repopilot:1.3.0-final` 的 Image ID/RepoDigest 为
+`sha256:9ffd8e5a795d3948b98c4d18fb13b7b0847352ea9d4416eec2490ff03413e167`。
+容器 `/ready`、非 root、read-only rootfs、`cap_drop: ALL`、`no-new-privileges`、`/tmp`
+tmpfs 和仅 `/app/data` 可写全部实测通过；测试容器、网络、卷与本地 smoke tag 已清理。
+
 ## v1.2.0 验收状态
+
+以下为历史冻结记录，不因 v1.3 修改而重算或改写。
 
 v1.2 已将默认控制平面迁移为真实 LangGraph `StateGraph`，显式表达
 Planner → Researcher ⇄ Reviewer → Writer；角色内部仍保留模型驱动工具循环，证据硬门槛、

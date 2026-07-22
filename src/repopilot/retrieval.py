@@ -15,6 +15,40 @@ BM25_K1 = 1.5
 BM25_B = 0.75
 
 
+def _source_diverse_top_k(ranked: list[ScoredChunk], top_k: int) -> list[ScoredChunk]:
+    """Prefer one high-scoring chunk per source before filling remaining slots.
+
+    Overlapping line windows from one large test or generated file can otherwise
+    consume every evidence slot, hiding a slightly lower-scoring but distinct
+    implementation file.  The first pass preserves score order and maximizes
+    source coverage; the second pass fills unused capacity with the remaining
+    highest-scoring chunks, so a corpus with only one useful source still returns
+    all available evidence.
+    """
+
+    if top_k <= 0:
+        return []
+    selected: list[ScoredChunk] = []
+    selected_ids: set[str] = set()
+    seen_sources: set[str] = set()
+    for hit in ranked:
+        source = hit.chunk.source_uri
+        if source in seen_sources:
+            continue
+        selected.append(hit)
+        selected_ids.add(hit.chunk.chunk_id)
+        seen_sources.add(source)
+        if len(selected) == top_k:
+            return selected
+    for hit in ranked:
+        if hit.chunk.chunk_id in selected_ids:
+            continue
+        selected.append(hit)
+        if len(selected) == top_k:
+            break
+    return selected
+
+
 def tokenize(text: str) -> list[str]:
     """Lowercased word tokens plus CJK character bigrams.
 
@@ -83,7 +117,7 @@ class LexicalRetriever:
             ),
             key=lambda item: (-item.score, item.chunk.source_uri, item.chunk.ordinal),
         )
-        return ranked[:top_k]
+        return _source_diverse_top_k(ranked, top_k)
 
     def _score(self, query_tokens: list[str], index: int) -> tuple[float, float]:
         frequency = self._frequencies[index]
@@ -179,4 +213,4 @@ class HybridRetriever:
             for hit in lexical_hits
         ]
         fused.sort(key=lambda item: (-item.score, item.chunk.source_uri, item.chunk.ordinal))
-        return fused[:top_k]
+        return _source_diverse_top_k(fused, top_k)

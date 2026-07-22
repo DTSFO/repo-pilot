@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "repo-pilot"
-version = "1.2.0"
+version = "1.3.0"
 description = "LangGraph-orchestrated, evidence-first repository research agent with citations and recovery"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -29,6 +29,7 @@ dependencies = [
 [project.optional-dependencies]
 postgres = ["asyncpg>=0.30,<1"]
 dev = [
+  "asgi-lifespan>=2,<3",
   "coverage[toml]>=7.6,<8",
   "mypy>=1.14,<2",
   "pytest>=8.3,<9",

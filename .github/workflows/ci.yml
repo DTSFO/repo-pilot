@@ -5,16 +5,26 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
           python-version: "3.12"
+      - run: uv lock --check --offline
       - run: uv sync --frozen --all-extras
+      - run: uv pip check
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy src
@@ -67,4 +77,114 @@ jobs:
           if metrics["revision_success_evaluated"] or metrics["revision_success_rate"] is not None:
               raise SystemExit("deterministic dataset has no revision-request cases")
           PY
-      - run: docker build -t repopilot:ci .
+      - name: Scan tracked source for high-confidence secrets
+        run: |
+          uv run python - <<'PY'
+          import subprocess
+          from pathlib import Path
+
+          from scripts.check_release import secret_pattern_labels
+
+          findings = []
+          tracked = subprocess.check_output(["git", "ls-files", "-z"]).split(b"\0")
+          for raw_path in tracked:
+              if not raw_path:
+                  continue
+              path = Path(raw_path.decode())
+              labels = secret_pattern_labels(path.read_bytes())
+              if labels:
+                  findings.append((path.as_posix(), labels))
+          for path, labels in findings:
+              print(f"{path}: {','.join(labels)}")
+          if findings:
+              raise SystemExit("secret-like content detected; values were redacted")
+          PY
+      - name: Build and independently validate release twice
+        run: |
+          uv run python scripts/build_release.py --out-dir /tmp/repopilot-release-a
+          uv run python scripts/check_release.py /tmp/repopilot-release-a
+          uv run python scripts/build_release.py --out-dir /tmp/repopilot-release-b
+          uv run python scripts/check_release.py /tmp/repopilot-release-b
+          uv run python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          first = Path("/tmp/repopilot-release-a")
+          second = Path("/tmp/repopilot-release-b")
+          names = sorted(path.name for path in first.iterdir() if path.is_file())
+          if names != sorted(path.name for path in second.iterdir() if path.is_file()):
+              raise SystemExit("release file sets differ")
+          for name in names:
+              left = hashlib.sha256((first / name).read_bytes()).digest()
+              right = hashlib.sha256((second / name).read_bytes()).digest()
+              if left != right:
+                  raise SystemExit(f"non-reproducible release file: {name}")
+          PY
+      - name: Install wheel in a clean environment
+        run: |
+          wheel=$(find /tmp/repopilot-release-a -maxdepth 1 -type f -name '*.whl' -print -quit)
+          test -n "$wheel"
+          uv venv --python 3.12 /tmp/repopilot-wheel-smoke
+          uv pip install --python /tmp/repopilot-wheel-smoke/bin/python "$wheel"
+          /tmp/repopilot-wheel-smoke/bin/repopilot --help
+          /tmp/repopilot-wheel-smoke/bin/python - <<'PY'
+          import json
+          from importlib.metadata import version
+          from pathlib import Path
+
+          manifest = json.loads(
+              Path("/tmp/repopilot-release-a/release-manifest.json").read_text()
+          )
+          assert version("repo-pilot") == manifest["version"]
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: repo-pilot-release-${{ github.run_id }}
+          path: /tmp/repopilot-release-a
+          if-no-files-found: error
+          retention-days: 7
+      - name: Validate Dockerfile and Compose
+        run: |
+          docker build --check .
+          REPOPILOT_IMAGE=repopilot:ci REPOPILOT_PORT=18000 docker compose config --quiet
+          docker build -t repopilot:ci .
+          test "$(docker image inspect repopilot:ci --format '{{.Config.User}}')" = "repopilot"
+      - name: Smoke hardened Compose container
+        env:
+          REPOPILOT_IMAGE: repopilot:ci
+          REPOPILOT_PORT: "18000"
+        run: |
+          cleanup() {
+            docker compose -p repopilot-ci down --volumes --remove-orphans
+          }
+          trap cleanup EXIT
+          docker compose -p repopilot-ci up --detach --no-build
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18000/ready >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = "1"
+          container_id=$(docker compose -p repopilot-ci ps --quiet repopilot)
+          docker inspect "$container_id" > /tmp/repopilot-container-inspect.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/repopilot-container-inspect.json").read_text())[0]
+          host = payload["HostConfig"]
+          assert host["ReadonlyRootfs"] is True
+          assert "ALL" in (host["CapDrop"] or [])
+          assert "no-new-privileges:true" in (host["SecurityOpt"] or [])
+          assert "/tmp" in (host["Tmpfs"] or {})
+          PY
+          docker compose -p repopilot-ci exec --no-TTY repopilot sh -c '
+            test "$(id -u)" -ne 0 &&
+            test ! -w /app &&
+            test -w /app/data &&
+            test ! -w /workspace &&
+            repopilot --help >/dev/null
+          '
