@@ -1,4 +1,23 @@
-# RepoPilot v1.3 Product Specification
+# RepoPilot v1.4 Product Specification
+
+## v1.4 user journey
+
+1. Register one or more server-visible repositories from the UI, CLI or REST API. Local paths are
+   constrained to an allowlist; Git onboarding accepts only HTTPS URLs without embedded credentials.
+2. Select a repository and run **重新索引**. The operation creates a new immutable revision and keeps
+   the previous ready revision available until the new snapshot passes ingestion.
+3. Create a task with the selected `repository_id`. The API resolves and persists the current
+   `revision_id`; later refreshes do not alter that task's corpus.
+4. Follow durable task events over SSE, inspect evidence, read sanitized HTML, and download original
+   Markdown, standalone offline HTML, or structured JSON.
+
+Uploaded UTF-8 documents are not in-place mutations: they are copied into a new overlay revision and
+therefore cannot invalidate a task that is already running. A subsequent repository sync carries the
+latest upload overlays into the new source revision.
+
+The browser form's local path refers to the RepoPilot host, not an arbitrary path on the user's laptop.
+Historical tasks remain readable after a repository is archived. A running task is not exportable and
+returns HTTP 409 instead of an empty or misleading file.
 
 ## Product statement
 
@@ -8,7 +27,8 @@ system creates a structured plan, lets a model choose registered read-only repos
 reviews candidate evidence with deterministic and semantic gates, performs bounded gap-filling, and
 produces a cited report whose execution can be inspected and resumed.
 
-The release is complete for a single-user, self-hosted, read-only research portfolio product. It
+The release is complete for a single-user, self-hosted, read-only multi-repository research portfolio
+product. It
 does not claim enterprise multi-tenancy, autonomous code modification, internet-scale throughput,
 or provider-independent model quality.
 

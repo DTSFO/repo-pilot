@@ -13,6 +13,7 @@ from repopilot.api import create_app
 from repopilot.config import Settings
 from repopilot.models import AgentRunResult
 from repopilot.providers.telemetry import ProviderEvent, emit_provider_event
+from repopilot.storage.repositories import DocumentStore
 
 
 def make_settings(tmp_path: Path, **overrides: object) -> Settings:
@@ -61,6 +62,11 @@ async def test_create_task_completes_offline(client: httpx.AsyncClient) -> None:
     assert "RepoPilot 研究报告" in report
     assert "尚未摄取任何仓库文档" in report
     assert body["degraded"] is True
+
+    listed = (await client.get("/api/tasks")).json()
+    summary = next(item for item in listed if item["id"] == task_id)
+    assert summary["has_report"] is True
+    assert "final_report" not in summary
 
 
 async def test_events_are_persisted_in_order(client: httpx.AsyncClient) -> None:
@@ -276,6 +282,90 @@ async def test_upload_document_ingests_and_searches(client: httpx.AsyncClient) -
     assert hits[0]["source_uri"] == "uploads/notes.md"
 
 
+async def test_upload_publishes_overlay_revision_without_mutating_old_tasks(
+    tmp_path: Path,
+) -> None:
+    app = create_app(make_settings(tmp_path))
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            first = await http.post(
+                "/api/documents",
+                files={"file": ("notes.md", b"first immutable upload\n")},
+            )
+            assert first.status_code == 201
+            repository = (await http.get("/api/repositories")).json()[0]
+            first_revision = repository["indexed_revision_id"]
+            task = await http.post("/api/tasks", json={"goal": "first immutable upload"})
+            task_id = task.json()["id"]
+            await wait_terminal(http, task_id)
+
+            second = await http.post(
+                "/api/documents",
+                files={"file": ("notes.md", b"second immutable upload\n")},
+            )
+            assert second.status_code == 201
+            refreshed = (await http.get("/api/repositories")).json()[0]
+            second_revision = refreshed["indexed_revision_id"]
+            frozen_task = (await http.get(f"/api/tasks/{task_id}")).json()
+
+        old_documents = DocumentStore(app.state.database, repository["id"], first_revision)
+        new_documents = DocumentStore(app.state.database, repository["id"], second_revision)
+        old_upload = await old_documents.latest_document("uploads/notes.md")
+        new_upload = await new_documents.latest_document("uploads/notes.md")
+
+    assert first_revision != second_revision
+    assert frozen_task["revision_id"] == first_revision
+    assert old_upload is not None and old_upload.content == "first immutable upload\n"
+    assert new_upload is not None and new_upload.content == "second immutable upload\n"
+
+
+async def test_upload_filename_traversal_is_rejected(client: httpx.AsyncClient) -> None:
+    response = await client.post(
+        "/api/documents",
+        files={"file": ("../escape.md", b"blocked\n")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "repository_request_rejected"
+
+
+async def test_repository_refresh_preserves_uploaded_overlay(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "README.md").write_text("repository source marker\n", encoding="utf-8")
+    app = create_app(
+        make_settings(
+            tmp_path,
+            workspace_root=workspace,
+            allowed_repository_roots=str(tmp_path),
+            repository_root=tmp_path / "managed",
+        )
+    )
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            uploaded = await http.post(
+                "/api/documents",
+                files={"file": ("notes.md", b"persistent upload marker\n")},
+            )
+            assert uploaded.status_code == 201
+            before = (await http.get("/api/repositories")).json()[0]["indexed_revision_id"]
+            synchronized = await http.post("/api/ingest", json={})
+            assert synchronized.status_code == 200
+            after = (await http.get("/api/repositories")).json()[0]["indexed_revision_id"]
+            upload_hits = (
+                await http.get("/api/search", params={"q": "persistent upload marker"})
+            ).json()
+            source_hits = (
+                await http.get("/api/search", params={"q": "repository source marker"})
+            ).json()
+
+    assert before != after
+    assert any(hit["source_uri"] == "uploads/notes.md" for hit in upload_hits)
+    assert any(hit["source_uri"] == "README.md" for hit in source_hits)
+
+
 async def test_oversized_upload_rejected(tmp_path: Path) -> None:
     app = create_app(make_settings(tmp_path, max_upload_bytes=1024))
     async with LifespanManager(app):
@@ -284,3 +374,123 @@ async def test_oversized_upload_rejected(tmp_path: Path) -> None:
             response = await http.post("/api/documents", files={"file": ("big.txt", b"x" * 2048)})
             assert response.status_code == 413
             assert response.json()["error"]["code"] == "document_too_large"
+
+
+async def test_report_is_rendered_and_all_exports_have_download_contract(
+    client: httpx.AsyncClient,
+) -> None:
+    task_id = (await client.post("/api/tasks", json={"goal": "export report"})).json()["id"]
+    await wait_terminal(client, task_id)
+
+    report = await client.get(f"/api/tasks/{task_id}/report")
+    assert report.status_code == 200
+    assert report.json()["markdown"].startswith("# ")
+    assert report.json()["html"].startswith("<h1>")
+    assert "<script" not in report.json()["html"].lower()
+
+    expected_types = {
+        "md": "text/markdown",
+        "html": "text/html",
+        "json": "application/json",
+    }
+    for export_format, content_type in expected_types.items():
+        exported = await client.get(f"/api/tasks/{task_id}/exports/{export_format}")
+        assert exported.status_code == 200
+        assert exported.headers["content-type"].startswith(content_type)
+        assert exported.headers["content-disposition"].startswith("attachment; filename=")
+        assert exported.headers["cache-control"] == "no-store"
+
+    envelope = (await client.get(f"/api/tasks/{task_id}/exports/json")).json()
+    assert envelope["metadata"]["task_id"] == task_id
+    unsupported = await client.get(f"/api/tasks/{task_id}/exports/pdf")
+    assert unsupported.status_code == 400
+    assert unsupported.json()["error"]["code"] == "unsupported_export_format"
+
+
+async def test_unfinished_report_export_returns_conflict(tmp_path: Path) -> None:
+    app = create_app(make_settings(tmp_path))
+    async with LifespanManager(app):
+        pending = await app.state.service.store.create_task("not started")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.get(f"/api/tasks/{pending.id}/exports/md")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "report_not_ready"
+
+
+async def test_export_endpoint_requires_api_token(tmp_path: Path) -> None:
+    app = create_app(make_settings(tmp_path, api_token="secret-token"))
+    authorization = {"Authorization": "Bearer secret-token"}
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            task_id = (
+                await http.post(
+                    "/api/tasks", json={"goal": "protected export"}, headers=authorization
+                )
+            ).json()["id"]
+            await app.state.service.wait_for_task(task_id)
+            denied = await http.get(f"/api/tasks/{task_id}/exports/html")
+            allowed = await http.get(f"/api/tasks/{task_id}/exports/html", headers=authorization)
+
+    assert denied.status_code == 401
+    assert allowed.status_code == 200
+
+
+async def test_repository_api_indexes_scopes_tasks_and_rejects_unsafe_paths(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = workspace / "service"
+    outside = tmp_path / "outside"
+    source.mkdir(parents=True)
+    outside.mkdir()
+    (source / "README.md").write_text("SCOPED REPOSITORY CONTENT", encoding="utf-8")
+    symlink = workspace / "linked-outside"
+    symlink.symlink_to(outside, target_is_directory=True)
+    settings = make_settings(
+        tmp_path,
+        workspace_root=str(workspace),
+        repository_root=str(tmp_path / "clones"),
+        allowed_repository_roots=str(workspace),
+    )
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            created = await http.post(
+                "/api/repositories",
+                json={"name": "Service", "local_path": str(source)},
+            )
+            assert created.status_code == 201
+            repository = created.json()
+            assert repository["status"] == "ready"
+            assert repository["indexed_revision_id"]
+            assert repository["last_error"] is None
+
+            task = await http.post(
+                "/api/tasks",
+                json={"goal": "inspect service", "repository_id": repository["id"]},
+            )
+            assert task.status_code == 202
+            assert task.json()["repository_id"] == repository["id"]
+            assert task.json()["revision_id"] == repository["indexed_revision_id"]
+
+            hits = await http.get(
+                "/api/search",
+                params={"q": "SCOPED REPOSITORY CONTENT", "repository_id": repository["id"]},
+            )
+            assert hits.status_code == 200
+            assert hits.json()[0]["source_uri"] == "README.md"
+
+            escaped = await http.post("/api/repositories", json={"local_path": str(outside)})
+            linked = await http.post("/api/repositories", json={"local_path": str(symlink)})
+            missing = await http.post("/api/repositories/missing/sync")
+
+    assert escaped.status_code == 400
+    assert escaped.json()["error"]["code"] == "repository_request_rejected"
+    assert linked.status_code == 400
+    assert linked.json()["error"]["code"] == "repository_request_rejected"
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "repository_not_found"

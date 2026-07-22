@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0 — 2026-07-22
+
+- 增加持久化多仓库注册表、本地/Git HTTPS onboarding、受控仓库目录和不可变索引 revision；
+  任务、文档、Chunk、证据、Checkpoint、检索和 MCP 均按仓库/revision 隔离。
+- 增加 v1.3 SQLite 数据库升级迁移：自动生成 legacy repository/revision，重建旧文档唯一约束，
+  保留历史任务与证据且迁移可幂等重跑。
+- 报告从原始 Markdown 展示升级为安全 Markdown→HTML 渲染，并提供 Markdown、离线 HTML、JSON
+  导出；导出接口统一鉴权、Content-Disposition、未完成任务 409 和不支持格式 400。
+- Web UI 支持仓库添加、选择、重新索引、任务过滤、SSE 事件流、证据展示和三种报告下载；Token
+  只保存在当前页面内存。
+- MCP、CLI、Docker/Compose 和配置示例同步支持多仓库；新增跨仓库隔离、迁移、XSS 和导出回归。
+
 ## 1.3.0 — 2026-07-22
 
 - 将 OpenAI-compatible 调用默认切换为上游 SSE，并在 Provider 内缓冲、合并和校验文本、

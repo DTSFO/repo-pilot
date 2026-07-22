@@ -7,11 +7,20 @@ from .models import (
     EvaluationRunRecord,
     EvidenceRecord,
     MemoryItemRecord,
+    RepositoryRecord,
+    RepositoryRevisionRecord,
     ResearchTaskRecord,
     SourceDocumentRecord,
     TaskEventRecord,
 )
-from .repositories import ChunkRow, DocumentStore, EvidenceStore, MemoryStore, TaskStore
+from .repositories import (
+    ChunkRow,
+    DocumentStore,
+    EvidenceStore,
+    MemoryStore,
+    RepositoryStore,
+    TaskStore,
+)
 
 __all__ = [
     "AgentRunRecord",
@@ -26,6 +35,9 @@ __all__ = [
     "EvidenceStore",
     "MemoryItemRecord",
     "MemoryStore",
+    "RepositoryRecord",
+    "RepositoryRevisionRecord",
+    "RepositoryStore",
     "ResearchTaskRecord",
     "SourceDocumentRecord",
     "TaskEventRecord",

@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./data/repopilot.db"
     redis_url: str | None = None
     workspace_root: Path = Path(".")
+    repository_root: Path = Path("./data/repositories")
+    allowed_repository_roots: str = ""
+    repository_sync_timeout_seconds: float = Field(default=120.0, gt=0, le=1800)
     api_token: SecretStr | None = None
     max_steps: int = Field(default=12, ge=1, le=100)
     max_tool_calls: int = Field(default=40, ge=1, le=1000)
@@ -68,6 +71,19 @@ class Settings(BaseSettings):
     @property
     def resolved_workspace_root(self) -> Path:
         return self.workspace_root.expanduser().resolve()
+
+    @property
+    def resolved_repository_root(self) -> Path:
+        return self.repository_root.expanduser().resolve()
+
+    @property
+    def repository_root_allowlist(self) -> tuple[Path, ...]:
+        configured = tuple(
+            Path(item.strip()).expanduser().resolve()
+            for item in self.allowed_repository_roots.split(",")
+            if item.strip()
+        )
+        return configured or (self.resolved_workspace_root,)
 
     @property
     def fetch_host_allowlist(self) -> frozenset[str]:

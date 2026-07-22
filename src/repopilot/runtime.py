@@ -34,6 +34,8 @@ class AsyncAgentRuntime:
         initial_messages: list[dict[str, Any]] | None = None,
         on_step: StepCallback | None = None,
         task_id: str | None = None,
+        repository_id: str | None = None,
+        revision_id: str | None = None,
     ) -> AgentRunResult:
         """Run the agent loop.
 
@@ -42,7 +44,7 @@ class AsyncAgentRuntime:
         during each completed step so callers can persist checkpoints and events;
         ``task_id`` is an optional correlation id used only for logging.
         """
-        del task_id
+        del task_id, repository_id, revision_id
         if initial_messages:
             messages: list[dict[str, Any]] = [dict(message) for message in initial_messages]
         else:

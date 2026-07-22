@@ -1,4 +1,22 @@
-# RepoPilot v1.3 Architecture
+# RepoPilot v1.4 Architecture
+
+## Repository and report boundary
+
+Repositories and index revisions are first-class durable scope. A repository identifies a managed
+local path or credential-free Git HTTPS source. Refresh computes a commit/tree fingerprint, builds a
+new immutable revision, and promotes it only after the full scan completes. Tasks persist both
+identifiers, so later refreshes cannot change an in-flight or historical task corpus. Failed refreshes
+retain the last ready revision; archiving is soft and preserves historical reports.
+
+Document, chunk, retrieval, evidence, checkpoint and repository-memory queries carry the same
+`(repository_id, revision_id)` boundary. Existing v1.3 SQLite databases are upgraded in place,
+including a rebuild of the old global document uniqueness constraint, and the migration is idempotent.
+
+Reports have three representations: original Markdown for auditability, sanitized HTML for the UI and
+standalone export, and a versioned JSON envelope containing metadata/evidence. Rendering is local and
+allowlisted; scripts, active attributes, dangerous URL schemes, images, forms and remote dependencies
+are rejected. Exports exclude raw Provider prompts/completions, telemetry bodies, endpoint URLs and
+credentials; the validated final report may contain ordinary allowlisted links and evidence URLs.
 
 ## System overview
 
@@ -277,7 +295,8 @@ src/repopilot/
 
 ## Scope boundary
 
-The architecture is complete for a single-user, self-hosted, read-only repository research product.
+The architecture is complete for a single-user, self-hosted, read-only multi-repository research
+portfolio product.
 It does not claim enterprise multi-tenancy, distributed scheduling, internet-scale indexing, or
 measured live-provider throughput. Those require a durable worker queue, cross-replica event bus,
 tenant-aware storage and authorization, learned retrieval services, capacity tests, and operational

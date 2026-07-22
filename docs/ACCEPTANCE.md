@@ -1,5 +1,29 @@
 # RepoPilot 验收记录
 
+## v1.4.0 发布前验收状态
+
+日期：2026-07-22 · 范围：持久化多仓库/revision、数据库迁移、渲染报告、导出、浏览器产品流和
+容器交付。v1.3.0 及更早版本的冻结数字、哈希和语义保持不变。
+
+| 检查 | v1.4 当前实际结果 |
+| --- | --- |
+| 单元/集成/API/迁移/仓库安全测试 | 204 passed，1 个浏览器测试按默认环境跳过 |
+| 静态与类型 | Ruff、format check、strict Mypy 全部通过 |
+| 分支覆盖率 | 86.21%，超过 85% 门槛 |
+| 浏览器产品流 | `REPOPILOT_RUN_BROWSER_TESTS=1 uv run pytest tests/test_browser.py`：1 passed；添加仓库→索引→任务→SSE→安全 HTML→三种下载；移动视口无横向溢出、控制台无错误 |
+| v1.4 deterministic 30-case 回归 | task success 0.9667；Recall@5 0.9583；citation precision/validity 1.0；refusal accuracy 1.0；degraded/fallback 0；P95 573.341ms |
+| v1.3 SQLite 迁移 | 真实旧表 fixture 升级、旧唯一约束重建、legacy repository/revision 回填、重复启动幂等、跨仓同 URI/hash 验证通过 |
+| 多仓库隔离 | 两仓同名文件检索隔离；任务冻结 `repository_id/revision_id`；刷新失败保留旧 ready revision；删除/重命名只影响新快照 |
+| 报告与导出 | 原始 Markdown、安全 HTML、离线 HTML、结构化 JSON；XSS/危险协议/脚本/远程依赖拒绝；运行中导出 409、未知格式 400、鉴权和下载头通过 |
+| API/部署默认值 | 任务列表仅返回摘要和 `has_report`；完整报告按需读取；Compose 默认绑定 `127.0.0.1`，远程部署文档要求 Token + TLS 反向代理 |
+| wheel/sdist | 两次独立构建逐字节一致；wheel `103813` bytes / `ce736feebb301827304621f4a9ef07e6b5bba8c682bbc30fbcad2c42a3c700f0`；sdist `265508` bytes / `74ea13768db325ff048b9d09f9988975ffdb1f2c1a67bab9cf3990025826ffc3` |
+| clean wheel smoke | 1.4.0 元数据、CLI、静态资源、Markdown renderer 和 FastAPI 版本检查通过 |
+| Docker/Compose hardened smoke | `/ready`、非 root、只读 rootfs、ALL capabilities dropped、no-new-privileges、可写 data/repository volume 通过；image `sha256:e87f7957024aacd7347fc57428f1d4b58719475d4478dd15f4cc80e2bbae1449` |
+
+本节数字只描述当前代码、固定离线数据集和本机验收，不代表真实模型质量、线上吞吐、容量或
+exactly-once。Provider 质量仍需针对具体 endpoint 单独评测；SSE 是持久事件表短轮询，Checkpoint
+是节点/轮次恢复。
+
 ## v1.3.0 冻结验收状态
 
 日期：2026-07-22 · 范围：Provider 可诊断流式调用、Reviewer 收敛控制、任务全局预算与

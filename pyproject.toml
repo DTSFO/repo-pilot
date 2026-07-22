@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "repo-pilot"
-version = "1.3.0"
+version = "1.4.0"
 description = "LangGraph-orchestrated, evidence-first repository research agent with citations and recovery"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -15,6 +15,8 @@ dependencies = [
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
   "langgraph>=1.2,<2",
+  "markdown-it-py>=3,<4",
+  "nh3>=0.2,<1",
   "orjson>=3.10,<4",
   "prometheus-client>=0.21,<1",
   "pydantic>=2.10,<3",
@@ -32,6 +34,7 @@ dev = [
   "asgi-lifespan>=2,<3",
   "coverage[toml]>=7.6,<8",
   "mypy>=1.14,<2",
+  "playwright>=1.55,<2",
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.25,<2",
   "pytest-cov>=6,<7",
@@ -56,6 +59,7 @@ exclude = [
 addopts = "-q --strict-markers --strict-config"
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = ["browser: real Chromium product-flow acceptance"]
 
 [tool.coverage.run]
 branch = true

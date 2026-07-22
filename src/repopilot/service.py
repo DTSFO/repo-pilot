@@ -192,6 +192,8 @@ class TaskRunner(Protocol):
         initial_messages: list[dict[str, Any]] | None = None,
         on_step: StepCallback | None = None,
         task_id: str | None = None,
+        repository_id: str | None = None,
+        revision_id: str | None = None,
     ) -> AgentRunResult: ...
 
 
@@ -219,10 +221,24 @@ class TaskService:
 
         return self._lifecycle_locks.setdefault(task_id, asyncio.Lock())
 
-    async def create_task(self, goal: str) -> ResearchTaskRecord:
-        record = await self.store.create_task(goal)
+    async def create_task(
+        self,
+        goal: str,
+        *,
+        repository_id: str | None = None,
+        revision_id: str | None = None,
+    ) -> ResearchTaskRecord:
+        record = await self.store.create_task(
+            goal, repository_id=repository_id, revision_id=revision_id
+        )
         TASKS_CREATED.inc()
-        self._spawn(record.id, goal, initial_messages=None)
+        self._spawn(
+            record.id,
+            goal,
+            initial_messages=None,
+            repository_id=repository_id,
+            revision_id=revision_id,
+        )
         return record
 
     async def get_task(self, task_id: str) -> ResearchTaskRecord:
@@ -231,8 +247,10 @@ class TaskService:
             raise TaskNotFoundError(details={"task_id": task_id})
         return record
 
-    async def list_tasks(self, *, limit: int = 50) -> list[ResearchTaskRecord]:
-        return await self.store.list_tasks(limit=limit)
+    async def list_tasks(
+        self, *, limit: int = 50, repository_id: str | None = None
+    ) -> list[ResearchTaskRecord]:
+        return await self.store.list_tasks(limit=limit, repository_id=repository_id)
 
     async def resume_task(self, task_id: str) -> ResearchTaskRecord:
         async with self._lifecycle_lock(task_id):
@@ -253,7 +271,13 @@ class TaskService:
                 "task.resumed",
                 {"from_version": checkpoint.version if checkpoint else 0},
             )
-            self._spawn(task_id, record.goal, initial_messages=initial_messages)
+            self._spawn(
+                task_id,
+                record.goal,
+                initial_messages=initial_messages,
+                repository_id=record.repository_id,
+                revision_id=record.revision_id,
+            )
             return await self.get_task(task_id)
 
     async def cancel_task(self, task_id: str) -> ResearchTaskRecord:
@@ -313,9 +337,11 @@ class TaskService:
         goal: str,
         *,
         initial_messages: list[dict[str, Any]] | None,
+        repository_id: str | None = None,
+        revision_id: str | None = None,
     ) -> None:
         self._running[task_id] = asyncio.create_task(
-            self._execute(task_id, goal, initial_messages),
+            self._execute(task_id, goal, initial_messages, repository_id, revision_id),
             name=f"repopilot-task-{task_id}",
         )
 
@@ -324,6 +350,8 @@ class TaskService:
         task_id: str,
         goal: str,
         initial_messages: list[dict[str, Any]] | None,
+        repository_id: str | None,
+        revision_id: str | None,
     ) -> None:
         async def on_step(
             step: int,
@@ -373,6 +401,8 @@ class TaskService:
                     initial_messages=initial_messages,
                     on_step=on_step,
                     task_id=task_id,
+                    repository_id=repository_id,
+                    revision_id=revision_id,
                 )
             await self._finalize(task_id, result)
         except asyncio.CancelledError:

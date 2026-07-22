@@ -61,7 +61,7 @@ REVIEW_MIN_COVERAGE = 0.3
 # only its first few lines.  Repository chunks are already bounded to 60 lines;
 # this second bound protects the model context from pathological long lines.
 QUOTE_MAX_CHARS = 3000
-STATE_VERSION = 1
+STATE_VERSION = 2
 CITATION_PATTERN = re.compile(r"\[(\d+)\]")
 
 
@@ -96,6 +96,8 @@ class WorkflowState(TypedDict, total=False):
     schema_version: int
     goal: str
     task_id: str | None
+    repository_id: str | None
+    revision_id: str | None
     next_node: GraphNode
     messages: list[dict[str, Any]]
     queries: list[str]
@@ -179,11 +181,13 @@ class ResearchWorkflow:
         initial_messages: list[dict[str, Any]] | None = None,
         on_step: StepCallback | None = None,
         task_id: str | None = None,
+        repository_id: str | None = None,
+        revision_id: str | None = None,
     ) -> AgentRunResult:
         messages = [
             dict(item) for item in (initial_messages or [{"role": "user", "content": goal}])
         ]
-        state = await self._prepare_state(goal, messages, task_id)
+        state = await self._prepare_state(goal, messages, task_id, repository_id, revision_id)
         recursion_limit = max(25, 2 * self.settings.max_review_rounds + 8)
         config: RunnableConfig = {
             "recursion_limit": recursion_limit,
@@ -207,13 +211,20 @@ class ResearchWorkflow:
         return self._result_from_state(state)
 
     async def _prepare_state(
-        self, goal: str, messages: list[dict[str, Any]], task_id: str | None
+        self,
+        goal: str,
+        messages: list[dict[str, Any]],
+        task_id: str | None,
+        repository_id: str | None,
+        revision_id: str | None,
     ) -> WorkflowState:
         restored = self._restore_state(messages, goal)
         state: WorkflowState = {
             "schema_version": STATE_VERSION,
             "goal": goal,
             "task_id": task_id,
+            "repository_id": repository_id or restored.get("repository_id"),
+            "revision_id": revision_id or restored.get("revision_id"),
             "next_node": self._graph_node(restored.get("next_node")),
             "messages": messages,
             "queries": [str(item) for item in restored.get("queries", [goal])],
@@ -243,7 +254,7 @@ class ResearchWorkflow:
         restored_status = restored.get("status")
         if restored_status in {"completed", "guarded"}:
             state["status"] = restored_status
-        rows = await self.documents.latest_chunk_rows()
+        rows = await self._documents_for_state(state).latest_chunk_rows()
         row_map = {row.chunk_id: row for row in rows}
         serialized = state.get("candidates", [])
         candidates = self._deserialize_candidates(serialized, row_map)
@@ -257,6 +268,14 @@ class ResearchWorkflow:
             state["degraded_reasons"] = sorted(reasons)
         return state
 
+    def _documents_for_state(self, state: WorkflowState) -> DocumentStore:
+        repository_id = state.get("repository_id")
+        return (
+            self.documents.scoped(repository_id, state.get("revision_id"))
+            if repository_id
+            else self.documents
+        )
+
     @staticmethod
     def _route_start(state: WorkflowState) -> GraphNode:
         return ResearchWorkflow._graph_node(state.get("next_node"))
@@ -269,7 +288,7 @@ class ResearchWorkflow:
         trace: list[TraceEvent] = []
         goal = state["goal"]
         plan, used_tokens, plan_degraded = await self._plan(goal, trace)
-        recalled = await self._recall(goal, trace)
+        recalled = await self._recall(goal, trace, repository_id=state.get("repository_id"))
         queries = list(dict.fromkeys((*plan.queries, *recalled)))[
             : MAX_QUERIES + MAX_RECALLED_MEMORIES
         ]
@@ -298,7 +317,7 @@ class ResearchWorkflow:
 
     async def _researcher_node(self, state: WorkflowState) -> dict[str, Any]:
         trace: list[TraceEvent] = []
-        rows = await self.documents.latest_chunk_rows()
+        rows = await self._documents_for_state(state).latest_chunk_rows()
         tools = RepositoryResearchTools(HybridRetriever(rows))
         row_map = {row.chunk_id: row for row in rows}
         tools.seed(self._deserialize_candidates(state.get("candidates", []), row_map))
@@ -354,7 +373,7 @@ class ResearchWorkflow:
 
     async def _reviewer_node(self, state: WorkflowState) -> dict[str, Any]:
         trace: list[TraceEvent] = []
-        rows = await self.documents.latest_chunk_rows()
+        rows = await self._documents_for_state(state).latest_chunk_rows()
         row_map = {row.chunk_id: row for row in rows}
         serialized = state.get("candidates", [])
         candidates = self._deserialize_candidates(serialized, row_map)
@@ -466,7 +485,7 @@ class ResearchWorkflow:
 
     async def _writer_node(self, state: WorkflowState) -> dict[str, Any]:
         trace: list[TraceEvent] = []
-        rows = await self.documents.latest_chunk_rows()
+        rows = await self._documents_for_state(state).latest_chunk_rows()
         retriever = HybridRetriever(rows)
         row_map = {row.chunk_id: row for row in rows}
         serialized = state.get("candidates", [])
@@ -530,7 +549,9 @@ class ResearchWorkflow:
         status: Literal["completed", "guarded"] = (
             "guarded" if reasons & guarded_reasons else "completed"
         )
-        await self._remember(state["goal"], accepted, state.get("task_id"))
+        await self._remember(
+            state["goal"], accepted, state.get("task_id"), repository_id=state.get("repository_id")
+        )
         trace.extend(
             [
                 TraceEvent(
@@ -1171,12 +1192,19 @@ class ResearchWorkflow:
         lines.extend(["---", "以上仓库相关结论均附带可定位的 `路径:行号` 引用。"])
         return "\n".join(lines)
 
-    async def _recall(self, goal: str, trace: list[TraceEvent]) -> list[str]:
+    async def _recall(
+        self,
+        goal: str,
+        trace: list[TraceEvent],
+        *,
+        repository_id: str | None,
+    ) -> list[str]:
         if self.memory is None:
             return []
         goal_tokens = set(tokenize(goal))
         scored = []
-        for item in await self.memory.list_memories(limit=50):
+        scope = f"repository:{repository_id}" if repository_id else "global"
+        for item in await self.memory.list_memories(scope=scope, limit=50):
             overlap = len(goal_tokens & set(tokenize(item.content)))
             if overlap:
                 scored.append((overlap * (1 + item.importance), item.content))
@@ -1193,12 +1221,20 @@ class ResearchWorkflow:
             )
         return recalled
 
-    async def _remember(self, goal: str, accepted: list[ScoredChunk], task_id: str | None) -> None:
+    async def _remember(
+        self,
+        goal: str,
+        accepted: list[ScoredChunk],
+        task_id: str | None,
+        *,
+        repository_id: str | None,
+    ) -> None:
         if self.memory is not None and task_id is not None and accepted:
             await self.memory.add_memory(
                 memory_type="task_summary",
                 content=f"{goal} => {', '.join(item.citation for item in accepted[:3])}",
                 source=f"task:{task_id}",
+                scope=f"repository:{repository_id}" if repository_id else "global",
                 importance=0.6,
                 metadata={"accepted_evidence": len(accepted)},
             )
@@ -1209,10 +1245,17 @@ class ResearchWorkflow:
             state = message.get("_repopilot_state")
             if (
                 isinstance(state, dict)
-                and state.get("schema_version") == STATE_VERSION
+                and state.get("schema_version") in {1, STATE_VERSION}
                 and state.get("goal") == goal
             ):
-                return dict(state)
+                restored = dict(state)
+                # v1 checkpoints predate repository scoping.  They remain
+                # resumable only as legacy/global runs; the new state shape
+                # is written immediately so subsequent resumes are v2.
+                restored["schema_version"] = STATE_VERSION
+                restored.setdefault("repository_id", None)
+                restored.setdefault("revision_id", None)
+                return restored
         return {
             "schema_version": STATE_VERSION,
             "goal": goal,

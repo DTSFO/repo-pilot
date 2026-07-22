@@ -153,12 +153,19 @@ def chunk_lines(
 class RepositoryIngestor:
     """Walk a workspace, persist versioned documents, and build retrieval chunks."""
 
-    def __init__(self, documents: DocumentStore, settings: Settings) -> None:
+    def __init__(
+        self,
+        documents: DocumentStore,
+        settings: Settings,
+        *,
+        root_path: Path | None = None,
+    ) -> None:
         self.documents = documents
         self.settings = settings
+        self.root_path = (root_path or settings.resolved_workspace_root).resolve()
 
     def resolve_safe_path(self, relative: str | None = None) -> Path:
-        root = self.settings.resolved_workspace_root
+        root = self.root_path
         if relative is None:
             return root
         requested = Path(relative)
@@ -184,7 +191,7 @@ class RepositoryIngestor:
 
     async def ingest_path(self, relative: str | None = None) -> IngestionReport:
         target = self.resolve_safe_path(relative)
-        root = self.settings.resolved_workspace_root
+        root = self.root_path
         scanned = ingested = unchanged = skipped = total_chunks = 0
 
         for path in self._iter_files(target):
@@ -212,7 +219,7 @@ class RepositoryIngestor:
         return IngestionReport(scanned, ingested, unchanged, skipped, total_chunks)
 
     def _iter_files(self, target: Path) -> list[Path]:
-        root = self.settings.resolved_workspace_root
+        root = self.root_path
         if target.is_file():
             if not self._is_allowed_file(target, root):
                 raise IngestionPathError(details={"path": target.relative_to(root).as_posix()})

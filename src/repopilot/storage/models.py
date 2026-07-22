@@ -26,10 +26,67 @@ class Base(DeclarativeBase):
     pass
 
 
+LEGACY_REPOSITORY_ID = "00000000-0000-0000-0000-000000000001"
+
+
+class RepositoryRecord(Base):
+    __tablename__ = "repositories"
+    __table_args__ = (
+        UniqueConstraint("identity_key", name="uq_repository_identity"),
+        Index("ix_repository_status_updated", "status", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    source_type: Mapped[str] = mapped_column(String(16), default="local")
+    identity_key: Mapped[str] = mapped_column(String(512), unique=True)
+    source_location: Mapped[str] = mapped_column(Text)
+    root_path: Mapped[str] = mapped_column(Text)
+    default_branch: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="ready", index=True)
+    indexed_revision_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    revisions: Mapped[list[RepositoryRevisionRecord]] = relationship(
+        back_populates="repository", cascade="all, delete-orphan"
+    )
+
+
+class RepositoryRevisionRecord(Base):
+    __tablename__ = "repository_revisions"
+    __table_args__ = (
+        UniqueConstraint("repository_id", "revision", name="uq_repository_revision"),
+        Index("ix_repository_revision_status", "repository_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    repository_id: Mapped[str] = mapped_column(
+        ForeignKey("repositories.id", ondelete="CASCADE"), index=True
+    )
+    revision: Mapped[str] = mapped_column(String(128))
+    root_path: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(24), default="indexing")
+    stats_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    repository: Mapped[RepositoryRecord] = relationship(back_populates="revisions")
+
+
 class ResearchTaskRecord(Base):
     __tablename__ = "research_tasks"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    repository_id: Mapped[str | None] = mapped_column(
+        ForeignKey("repositories.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    revision_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     goal: Mapped[str] = mapped_column(Text)
     constraints_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     budget_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -92,9 +149,22 @@ class CheckpointRecord(Base):
 
 class SourceDocumentRecord(Base):
     __tablename__ = "source_documents"
-    __table_args__ = (UniqueConstraint("source_uri", "content_hash", name="uq_source_version"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "repository_id",
+            "revision_id",
+            "source_uri",
+            "content_hash",
+            name="uq_source_repository_revision_version",
+        ),
+        Index("ix_source_repository_uri_version", "repository_id", "source_uri", "version"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    repository_id: Mapped[str | None] = mapped_column(
+        ForeignKey("repositories.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    revision_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     source_uri: Mapped[str] = mapped_column(Text, index=True)
     source_type: Mapped[str] = mapped_column(String(32), index=True)
     title: Mapped[str] = mapped_column(Text)
@@ -136,6 +206,10 @@ class EvidenceRecord(Base):
     __table_args__ = (Index("ix_evidence_task_status", "task_id", "review_status"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    repository_id: Mapped[str | None] = mapped_column(
+        ForeignKey("repositories.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    revision_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     task_id: Mapped[str] = mapped_column(
         ForeignKey("research_tasks.id", ondelete="CASCADE"), index=True
     )

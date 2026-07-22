@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
 from uuid import uuid4
@@ -12,10 +12,13 @@ from sqlalchemy.exc import IntegrityError
 
 from .database import Database
 from .models import (
+    LEGACY_REPOSITORY_ID,
     CheckpointRecord,
     ChunkRecord,
     EvidenceRecord,
     MemoryItemRecord,
+    RepositoryRecord,
+    RepositoryRevisionRecord,
     ResearchTaskRecord,
     SourceDocumentRecord,
     TaskEventRecord,
@@ -37,11 +40,15 @@ class TaskStore:
         self,
         goal: str,
         *,
+        repository_id: str | None = None,
+        revision_id: str | None = None,
         constraints: dict[str, Any] | None = None,
         budget: dict[str, Any] | None = None,
     ) -> ResearchTaskRecord:
         record = ResearchTaskRecord(
             id=str(uuid4()),
+            repository_id=repository_id,
+            revision_id=revision_id,
             goal=goal,
             constraints_json=constraints or {},
             budget_json=budget or {},
@@ -55,13 +62,14 @@ class TaskStore:
         async with self.database.session() as session:
             return await session.get(ResearchTaskRecord, task_id)
 
-    async def list_tasks(self, *, limit: int = 50) -> list[ResearchTaskRecord]:
+    async def list_tasks(
+        self, *, limit: int = 50, repository_id: str | None = None
+    ) -> list[ResearchTaskRecord]:
         async with self.database.session() as session:
-            result = await session.scalars(
-                select(ResearchTaskRecord)
-                .order_by(ResearchTaskRecord.created_at.desc())
-                .limit(limit)
-            )
+            query = select(ResearchTaskRecord).order_by(ResearchTaskRecord.created_at.desc())
+            if repository_id is not None:
+                query = query.where(ResearchTaskRecord.repository_id == repository_id)
+            result = await session.scalars(query.limit(limit))
             return list(result)
 
     async def update_task(self, task_id: str, **changes: Any) -> ResearchTaskRecord:
@@ -178,6 +186,210 @@ class TaskStore:
             return result.first()
 
 
+class RepositoryStore:
+    """Persistent repository registry and immutable index revision metadata."""
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def ensure_legacy(self, root_path: str) -> RepositoryRecord:
+        async with self.database.session() as session:
+            record = await session.get(RepositoryRecord, LEGACY_REPOSITORY_ID)
+            if record is None:
+                record = RepositoryRecord(
+                    id=LEGACY_REPOSITORY_ID,
+                    name="Default workspace",
+                    source_type="local",
+                    identity_key=f"legacy:{root_path}",
+                    source_location=root_path,
+                    root_path=root_path,
+                    status="ready",
+                    metadata_json={"legacy": True},
+                )
+                session.add(record)
+                await session.flush()
+            elif not record.metadata_json.get("legacy"):
+                record.metadata_json = {**record.metadata_json, "legacy": True}
+                record.source_location = root_path
+                record.root_path = root_path
+                await session.flush()
+            return record
+
+    async def create_local(
+        self,
+        *,
+        name: str,
+        identity_key: str,
+        source_location: str,
+        root_path: str,
+        source_type: str = "local",
+    ) -> RepositoryRecord:
+        async with self.database.session() as session:
+            existing = await session.scalar(
+                select(RepositoryRecord).where(RepositoryRecord.identity_key == identity_key)
+            )
+            if existing is not None:
+                return existing
+            record = RepositoryRecord(
+                id=str(uuid4()),
+                name=name,
+                source_type=source_type,
+                identity_key=identity_key,
+                source_location=source_location,
+                root_path=root_path,
+                status="ready",
+            )
+            session.add(record)
+            await session.flush()
+            return record
+
+    async def get_repository_by_identity(self, identity_key: str) -> RepositoryRecord | None:
+        async with self.database.session() as session:
+            result = await session.scalars(
+                select(RepositoryRecord).where(RepositoryRecord.identity_key == identity_key)
+            )
+            return result.first()
+
+    async def list_repositories(self, *, include_archived: bool = False) -> list[RepositoryRecord]:
+        async with self.database.session() as session:
+            query = select(RepositoryRecord).order_by(RepositoryRecord.updated_at.desc())
+            if not include_archived:
+                query = query.where(RepositoryRecord.status != "archived")
+            return list(await session.scalars(query))
+
+    async def get_repository(self, repository_id: str) -> RepositoryRecord | None:
+        async with self.database.session() as session:
+            return await session.get(RepositoryRecord, repository_id)
+
+    async def update_repository(self, repository_id: str, **changes: Any) -> RepositoryRecord:
+        allowed = {"name", "status", "indexed_revision_id", "last_error", "metadata_json"}
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"Unsupported repository fields: {sorted(unknown)}")
+        async with self.database.session() as session:
+            record = await session.get(RepositoryRecord, repository_id)
+            if record is None:
+                raise KeyError(repository_id)
+            for field, value in changes.items():
+                setattr(record, field, value)
+            await session.flush()
+            return record
+
+    async def create_revision(
+        self,
+        repository_id: str,
+        *,
+        revision: str,
+        root_path: str,
+        stats: dict[str, Any] | None = None,
+    ) -> RepositoryRevisionRecord:
+        async with self.database.session() as session:
+            existing = await session.scalar(
+                select(RepositoryRevisionRecord).where(
+                    RepositoryRevisionRecord.repository_id == repository_id,
+                    RepositoryRevisionRecord.revision == revision,
+                )
+            )
+            if existing is not None:
+                return existing
+            record = RepositoryRevisionRecord(
+                id=str(uuid4()),
+                repository_id=repository_id,
+                revision=revision,
+                root_path=root_path,
+                status="indexing",
+                stats_json=stats or {},
+            )
+            session.add(record)
+            await session.flush()
+            return record
+
+    async def begin_revision(self, revision_id: str) -> RepositoryRevisionRecord:
+        """Start or retry an index build without changing the active ready revision."""
+
+        async with self.database.session() as session:
+            record = await session.get(RepositoryRevisionRecord, revision_id)
+            if record is None:
+                raise KeyError(revision_id)
+            record.status = "indexing"
+            record.stats_json = {}
+            record.error_code = None
+            record.completed_at = None
+            await session.flush()
+            return record
+
+    async def reset_revision_documents(self, repository_id: str, revision_id: str) -> None:
+        """Remove partial index writes before a revision build or retry."""
+
+        document_ids = select(SourceDocumentRecord.id).where(
+            SourceDocumentRecord.repository_id == repository_id,
+            SourceDocumentRecord.revision_id == revision_id,
+        )
+        async with self.database.session() as session:
+            await session.execute(
+                delete(ChunkRecord).where(ChunkRecord.document_id.in_(document_ids))
+            )
+            await session.execute(
+                delete(SourceDocumentRecord).where(
+                    SourceDocumentRecord.repository_id == repository_id,
+                    SourceDocumentRecord.revision_id == revision_id,
+                )
+            )
+
+    async def finish_revision(
+        self,
+        revision_id: str,
+        *,
+        status: str,
+        stats: dict[str, Any],
+        error_code: str | None = None,
+    ) -> RepositoryRevisionRecord:
+        async with self.database.session() as session:
+            record = await session.get(RepositoryRevisionRecord, revision_id)
+            if record is None:
+                raise KeyError(revision_id)
+            record.status = status
+            record.stats_json = stats
+            record.error_code = error_code
+            record.completed_at = datetime.now(UTC)
+            if status == "ready":
+                repository = await session.get(RepositoryRecord, record.repository_id)
+                if repository is not None:
+                    repository.indexed_revision_id = record.id
+                    repository.status = "ready"
+                    repository.last_error = None
+            else:
+                repository = await session.get(RepositoryRecord, record.repository_id)
+                if repository is not None:
+                    # A failed refresh must never evict the last known-good index.
+                    repository.status = "ready" if repository.indexed_revision_id else "failed"
+                    repository.last_error = error_code
+            await session.flush()
+            return record
+
+    async def get_revision(self, revision_id: str) -> RepositoryRevisionRecord | None:
+        async with self.database.session() as session:
+            return await session.get(RepositoryRevisionRecord, revision_id)
+
+    async def get_latest_ready_revision(
+        self, repository_id: str
+    ) -> RepositoryRevisionRecord | None:
+        async with self.database.session() as session:
+            result = await session.scalars(
+                select(RepositoryRevisionRecord)
+                .where(
+                    RepositoryRevisionRecord.repository_id == repository_id,
+                    RepositoryRevisionRecord.status == "ready",
+                )
+                .order_by(
+                    RepositoryRevisionRecord.completed_at.desc(),
+                    RepositoryRevisionRecord.created_at.desc(),
+                )
+                .limit(1)
+            )
+            return result.first()
+
+
 @dataclass(frozen=True)
 class ChunkRow:
     """A retrieval-ready chunk joined with its source document."""
@@ -190,13 +402,119 @@ class ChunkRow:
     ordinal: int
     line_start: int | None
     line_end: int | None
+    repository_id: str = LEGACY_REPOSITORY_ID
+    revision_id: str | None = None
 
 
 class DocumentStore:
     """Versioned source documents and their retrieval chunks."""
 
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self,
+        database: Database,
+        repository_id: str = LEGACY_REPOSITORY_ID,
+        revision_id: str | None = None,
+    ) -> None:
         self.database = database
+        self.repository_id = repository_id
+        self.revision_id = revision_id
+
+    def _scope(self) -> tuple[Any, ...]:
+        if self.revision_id is None:
+            return (SourceDocumentRecord.repository_id == self.repository_id,)
+        return (
+            SourceDocumentRecord.repository_id == self.repository_id,
+            SourceDocumentRecord.revision_id == self.revision_id,
+        )
+
+    def scoped(self, repository_id: str, revision_id: str | None = None) -> DocumentStore:
+        return DocumentStore(self.database, repository_id, revision_id)
+
+    async def replace_revision_snapshot(self, source_revision_id: str | None) -> tuple[int, int]:
+        """Atomically copy a ready revision into this revision.
+
+        This is used for upload overlays: an uploaded document creates a new immutable revision
+        rather than mutating the revision already bound to historical tasks. Retrying a failed
+        overlay first clears the incomplete target snapshot.
+        """
+
+        if self.revision_id is None:
+            raise ValueError("target revision is required")
+        async with self.database.session() as session:
+            target_ids = list(
+                await session.scalars(
+                    select(SourceDocumentRecord.id).where(
+                        SourceDocumentRecord.repository_id == self.repository_id,
+                        SourceDocumentRecord.revision_id == self.revision_id,
+                    )
+                )
+            )
+            if target_ids:
+                await session.execute(
+                    delete(ChunkRecord).where(ChunkRecord.document_id.in_(target_ids))
+                )
+                await session.execute(
+                    delete(SourceDocumentRecord).where(SourceDocumentRecord.id.in_(target_ids))
+                )
+            if source_revision_id is None:
+                return 0, 0
+
+            source_documents = list(
+                await session.scalars(
+                    select(SourceDocumentRecord)
+                    .where(
+                        SourceDocumentRecord.repository_id == self.repository_id,
+                        SourceDocumentRecord.revision_id == source_revision_id,
+                    )
+                    .order_by(SourceDocumentRecord.source_uri, SourceDocumentRecord.version)
+                )
+            )
+            source_ids = [record.id for record in source_documents]
+            chunks = (
+                list(
+                    await session.scalars(
+                        select(ChunkRecord)
+                        .where(ChunkRecord.document_id.in_(source_ids))
+                        .order_by(ChunkRecord.document_id, ChunkRecord.ordinal)
+                    )
+                )
+                if source_ids
+                else []
+            )
+            document_ids: dict[str, str] = {}
+            for source_document in source_documents:
+                clone_id = str(uuid4())
+                document_ids[source_document.id] = clone_id
+                session.add(
+                    SourceDocumentRecord(
+                        id=clone_id,
+                        repository_id=self.repository_id,
+                        revision_id=self.revision_id,
+                        source_uri=source_document.source_uri,
+                        source_type=source_document.source_type,
+                        title=source_document.title,
+                        content_hash=source_document.content_hash,
+                        version=source_document.version,
+                        content=source_document.content,
+                        metadata_json=dict(source_document.metadata_json),
+                    )
+                )
+            for source_chunk in chunks:
+                session.add(
+                    ChunkRecord(
+                        id=str(uuid4()),
+                        document_id=document_ids[source_chunk.document_id],
+                        ordinal=source_chunk.ordinal,
+                        content=source_chunk.content,
+                        token_count=source_chunk.token_count,
+                        line_start=source_chunk.line_start,
+                        line_end=source_chunk.line_end,
+                        embedding_json=list(source_chunk.embedding_json),
+                        metadata_json=dict(source_chunk.metadata_json),
+                    )
+                )
+            await session.flush()
+            return len(source_documents), len(chunks)
 
     async def upsert_document(
         self,
@@ -211,7 +529,7 @@ class DocumentStore:
         async with self.database.session() as session:
             latest_result = await session.scalars(
                 select(SourceDocumentRecord)
-                .where(SourceDocumentRecord.source_uri == source_uri)
+                .where(*self._scope(), SourceDocumentRecord.source_uri == source_uri)
                 .order_by(SourceDocumentRecord.version.desc())
                 .limit(1)
             )
@@ -221,6 +539,7 @@ class DocumentStore:
 
             existing = await session.scalars(
                 select(SourceDocumentRecord).where(
+                    *self._scope(),
                     SourceDocumentRecord.source_uri == source_uri,
                     SourceDocumentRecord.content_hash == content_hash,
                 )
@@ -229,6 +548,8 @@ class DocumentStore:
             if found is not None:
                 found.source_type = source_type
                 found.title = title
+                found.repository_id = self.repository_id
+                found.revision_id = self.revision_id
                 found.version = (latest.version if latest is not None else 0) + 1
                 found.content = content
                 found.metadata_json = metadata or {}
@@ -237,6 +558,8 @@ class DocumentStore:
                 return found, True
             record = SourceDocumentRecord(
                 id=str(uuid4()),
+                repository_id=self.repository_id,
+                revision_id=self.revision_id,
                 source_uri=source_uri,
                 source_type=source_type,
                 title=title,
@@ -277,10 +600,21 @@ class DocumentStore:
         async with self.database.session() as session:
             result = await session.scalars(
                 select(SourceDocumentRecord)
+                .where(*self._scope())
                 .order_by(SourceDocumentRecord.created_at.desc())
                 .limit(limit)
             )
             return list(result)
+
+    async def latest_document(self, source_uri: str) -> SourceDocumentRecord | None:
+        async with self.database.session() as session:
+            result = await session.scalars(
+                select(SourceDocumentRecord)
+                .where(*self._scope(), SourceDocumentRecord.source_uri == source_uri)
+                .order_by(SourceDocumentRecord.version.desc())
+                .limit(1)
+            )
+            return result.first()
 
     async def latest_documents(self, *, limit: int | None = None) -> list[SourceDocumentRecord]:
         """Return only the newest version of each source document."""
@@ -290,6 +624,7 @@ class DocumentStore:
                     SourceDocumentRecord.source_uri,
                     func.max(SourceDocumentRecord.version).label("max_version"),
                 )
+                .where(*self._scope())
                 .group_by(SourceDocumentRecord.source_uri)
                 .subquery()
             )
@@ -300,11 +635,37 @@ class DocumentStore:
                     (SourceDocumentRecord.source_uri == latest.c.source_uri)
                     & (SourceDocumentRecord.version == latest.c.max_version),
                 )
+                .where(*self._scope())
                 .order_by(SourceDocumentRecord.source_uri)
             )
             if limit is not None:
                 query = query.limit(limit)
             result = await session.scalars(query)
+            return list(result)
+
+    async def latest_documents_by_source_type(self, source_type: str) -> list[SourceDocumentRecord]:
+        """Return the current document for each URI of one source type."""
+
+        async with self.database.session() as session:
+            latest = (
+                select(
+                    SourceDocumentRecord.source_uri,
+                    func.max(SourceDocumentRecord.version).label("max_version"),
+                )
+                .where(*self._scope(), SourceDocumentRecord.source_type == source_type)
+                .group_by(SourceDocumentRecord.source_uri)
+                .subquery()
+            )
+            result = await session.scalars(
+                select(SourceDocumentRecord)
+                .join(
+                    latest,
+                    (SourceDocumentRecord.source_uri == latest.c.source_uri)
+                    & (SourceDocumentRecord.version == latest.c.max_version),
+                )
+                .where(*self._scope(), SourceDocumentRecord.source_type == source_type)
+                .order_by(SourceDocumentRecord.source_uri)
+            )
             return list(result)
 
     async def latest_chunk_rows(self) -> list[ChunkRow]:
@@ -315,6 +676,7 @@ class DocumentStore:
                     SourceDocumentRecord.source_uri,
                     func.max(SourceDocumentRecord.version).label("max_version"),
                 )
+                .where(*self._scope())
                 .group_by(SourceDocumentRecord.source_uri)
                 .subquery()
             )
@@ -329,6 +691,7 @@ class DocumentStore:
                     (SourceDocumentRecord.source_uri == latest.c.source_uri)
                     & (SourceDocumentRecord.version == latest.c.max_version),
                 )
+                .where(*self._scope())
                 .order_by(SourceDocumentRecord.source_uri, ChunkRecord.ordinal)
             )
             return [
@@ -341,6 +704,8 @@ class DocumentStore:
                     ordinal=chunk.ordinal,
                     line_start=chunk.line_start,
                     line_end=chunk.line_end,
+                    repository_id=document.repository_id or LEGACY_REPOSITORY_ID,
+                    revision_id=document.revision_id,
                 )
                 for chunk, document in result.all()
             ]
@@ -356,6 +721,8 @@ class EvidenceStore:
         self,
         *,
         task_id: str,
+        repository_id: str | None = None,
+        revision_id: str | None = None,
         claim: str,
         quote: str,
         source_uri: str,
@@ -367,6 +734,8 @@ class EvidenceStore:
         record = EvidenceRecord(
             id=str(uuid4()),
             task_id=task_id,
+            repository_id=repository_id,
+            revision_id=revision_id,
             chunk_id=chunk_id,
             claim=claim,
             quote=quote,
@@ -393,6 +762,9 @@ class EvidenceStore:
         self,
         task_id: str,
         items: list[dict[str, Any]],
+        *,
+        repository_id: str | None = None,
+        revision_id: str | None = None,
     ) -> list[EvidenceRecord]:
         """Idempotently replace a task's reviewed evidence snapshot."""
         async with self.database.session() as session:
@@ -401,6 +773,8 @@ class EvidenceStore:
                 EvidenceRecord(
                     id=str(uuid4()),
                     task_id=task_id,
+                    repository_id=repository_id or item.get("repository_id"),
+                    revision_id=revision_id or item.get("revision_id"),
                     chunk_id=item.get("chunk_id"),
                     claim=str(item["claim"]),
                     quote=str(item["quote"]),

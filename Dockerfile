@@ -10,9 +10,11 @@ FROM python:3.12-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3
 RUN useradd --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --uid 10001 repopilot
 WORKDIR /app
 COPY --from=builder --chown=root:root /app /app
-RUN mkdir -p /app/data /workspace \
+RUN mkdir -p /app/data /repositories /workspace \
     && chown repopilot:repopilot /app/data \
     && chmod 0750 /app/data \
+    && chown repopilot:repopilot /repositories \
+    && chmod 0750 /repositories \
     && chmod 0555 /workspace
 USER repopilot
 ENV HOME="/tmp" \
@@ -20,8 +22,11 @@ ENV HOME="/tmp" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     REPOPILOT_DATABASE_URL="sqlite+aiosqlite:////app/data/repopilot.db" \
-    REPOPILOT_WORKSPACE_ROOT="/workspace"
+    REPOPILOT_WORKSPACE_ROOT="/workspace" \
+    REPOPILOT_REPOSITORY_ROOT="/repositories" \
+    REPOPILOT_ALLOWED_REPOSITORY_ROOTS="/workspace,/imports"
 VOLUME ["/app/data"]
+VOLUME ["/repositories"]
 EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=3s --retries=3 \
   CMD python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/ready')"

@@ -1,4 +1,33 @@
-# RepoPilot v1.3 Release Gates
+# RepoPilot v1.4 Release Gates
+
+`v1.0.0` through `v1.3.0` are frozen historical releases. Their acceptance numbers, artifact hashes,
+and image digests must not be rewritten. Before publishing v1.4, all of these gates must be backed by
+command output or inspectable tests:
+
+## v1.4 repository, revision and report gates
+
+- [x] Two repositories with the same `README.md` URI and content hash remain isolated in storage and
+  `/api/search`; a task's repository/revision never changes after refresh.
+- [x] A real v1.3 SQLite fixture upgrades in place, backfills legacy repository/revision, replaces the
+  old global document uniqueness constraint, and passes a second idempotent startup.
+- [x] Refresh failure marks the new revision failed, preserves the previous ready revision, releases
+  the per-repository lock, and deleted/renamed files disappear from the new snapshot.
+- [x] Local onboarding rejects relative paths, symlink roots and allowlist escapes. Git onboarding
+  rejects credentials, non-HTTPS URLs, loopback/private/reserved hosts, and cleans failed clones.
+- [x] Report API returns original Markdown plus sanitized HTML; exports provide Markdown, self-contained
+  HTML and versioned JSON with correct media types, authentication, 409-not-ready and 400-unsupported
+  behavior.
+- [x] Task listings expose bounded summaries with `has_report`; full Markdown is returned only by task
+  detail/report/export endpoints, avoiding repeated bulk report transfer during UI refresh.
+- [x] Browser smoke covers repository add/select/sync, task creation, SSE reconnect, safe XSS rendering,
+  desktop/mobile layout and all three downloads. No `innerHTML`, inline script, persistent token storage
+  or external renderer dependency is permitted.
+- [x] Compose binds to `127.0.0.1` by default. Documentation requires a high-entropy API token and a
+  TLS reverse proxy before selecting a non-loopback bind address.
+- [x] MCP and CLI require an unambiguous repository when multiple repositories exist and resolve all
+  search/read operations against the selected ready revision.
+- [x] Clean wheel and Docker/Compose smoke include migrations, static assets, renderer, repository-volume
+  persistence and two-repository isolation.
 
 `v1.0.0`, `v1.1.0`, and `v1.2.0` are frozen historical releases. Their acceptance numbers,
 artifact hashes, and image digests must not be rewritten. `v1.3.0` is frozen only after every open

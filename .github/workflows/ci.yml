@@ -29,6 +29,12 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy src
       - run: uv run pytest --cov=repopilot --cov-branch
+      - name: Install Chromium for product-flow acceptance
+        run: uv run playwright install --with-deps chromium
+      - name: Run real browser desktop/mobile, SSE and export smoke
+        env:
+          REPOPILOT_RUN_BROWSER_TESTS: "1"
+        run: uv run pytest tests/test_browser.py
       - run: uv run repopilot eval --output /tmp/repopilot-eval.json
       - name: Enforce evaluation gates
         run: |
@@ -147,6 +153,21 @@ jobs:
         run: |
           docker build --check .
           REPOPILOT_IMAGE=repopilot:ci REPOPILOT_PORT=18000 docker compose config --quiet
+          REPOPILOT_IMAGE=repopilot:ci REPOPILOT_PORT=18000 docker compose config --format json > /tmp/repopilot-compose.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/repopilot-compose.json").read_text())
+          ports = payload["services"]["repopilot"]["ports"]
+          assert ports == [{
+              "mode": "ingress",
+              "target": 8000,
+              "published": "18000",
+              "protocol": "tcp",
+              "host_ip": "127.0.0.1",
+          }]
+          PY
           docker build -t repopilot:ci .
           test "$(docker image inspect repopilot:ci --format '{{.Config.User}}')" = "repopilot"
       - name: Smoke hardened Compose container
