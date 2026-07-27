@@ -61,6 +61,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings.daily_task_limit, 0)
         self.assertEqual(settings.daily_quota_timezone, "UTC")
         self.assertFalse(settings.public_demo_mode)
+        self.assertFalse(settings.cloudflare_browser_insights_enabled)
 
     def test_public_demo_requires_quota_when_general_api_token_is_unset(self) -> None:
         with self.assertRaises(ValidationError):

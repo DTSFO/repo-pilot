@@ -23,6 +23,10 @@ allowlisted; scripts, active attributes, dangerous URL schemes, images, forms an
 are rejected. Exports exclude raw Provider prompts/completions, telemetry bodies, endpoint URLs and
 credentials; the validated final report may contain ordinary allowlisted links and evidence URLs.
 
+The application CSP allows only same-origin scripts and connections by default. A deployment-specific,
+default-off switch may add the exact Cloudflare Browser Insights script and reporting origins when the
+edge injects that beacon; it does not enable wildcard Cloudflare origins or change report sanitization.
+
 ## System overview
 
 ```text

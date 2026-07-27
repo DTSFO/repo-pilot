@@ -68,6 +68,19 @@ def _quota_date_and_retry(timezone_name: str) -> tuple[str, int]:
     return now.date().isoformat(), max(1, int((next_day - now).total_seconds()))
 
 
+def _content_security_policy(settings: Settings) -> str:
+    script_sources = "'self'"
+    connect_sources = "'self'"
+    if settings.cloudflare_browser_insights_enabled:
+        script_sources += " https://static.cloudflareinsights.com"
+        connect_sources += " https://cloudflareinsights.com"
+    return (
+        f"default-src 'none'; script-src {script_sources}; style-src 'self'; "
+        f"connect-src {connect_sources}; img-src 'self' data:; font-src 'self'; "
+        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+    )
+
+
 class AuthenticationError(RepoPilotError):
     code = "unauthorized"
     safe_message = "A valid API token is required."
@@ -303,6 +316,7 @@ class TaskEventResponse(BaseModel):
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     app_settings = settings or get_settings()
+    content_security_policy = _content_security_policy(app_settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -355,9 +369,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         response.headers.setdefault(
             "Content-Security-Policy",
-            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
-            "img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; "
-            "frame-ancestors 'none'; form-action 'none'",
+            content_security_policy,
         )
         return response
 

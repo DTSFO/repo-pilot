@@ -48,6 +48,9 @@ the final candidate.
 - [x] Public-Demo management endpoints fail closed without an administrator token; quota-limited
   task creation, UUID-addressed task reads, runtime-mode disclosure, and page-session task history
   behavior are covered by API/UI tests without persisting bearer credentials.
+- [x] Cloudflare Browser Insights support is default-off and extends CSP only to the exact script
+  and reporting origins when enabled; configuration, API headers, Compose defaults, and hardened
+  container behavior are covered without wildcard third-party access.
 
 ## v1.5 delivery and deployment
 

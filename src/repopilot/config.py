@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     api_token: SecretStr | None = None
     admin_api_token: SecretStr | None = None
     public_demo_mode: bool = False
+    cloudflare_browser_insights_enabled: bool = False
     daily_task_limit: int = Field(default=0, ge=0, le=1000)
     daily_quota_timezone: str = "UTC"
     max_steps: int = Field(default=12, ge=1, le=100)

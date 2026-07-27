@@ -330,10 +330,30 @@ async def test_metrics_and_index_page(client: httpx.AsyncClient) -> None:
     index = await client.get("/")
     assert index.status_code == 200
     assert "RepoPilot" in index.text
+    content_security_policy = index.headers["content-security-policy"]
+    assert "script-src 'self';" in content_security_policy
+    assert "connect-src 'self';" in content_security_policy
+    assert "static.cloudflareinsights.com" not in content_security_policy
+    assert "cloudflareinsights.com" not in content_security_policy
 
     metrics = await client.get("/metrics")
     assert metrics.status_code == 200
     assert "repopilot_http_requests_total" in metrics.text
+
+
+async def test_cloudflare_browser_insights_csp_is_explicit_and_origin_scoped(
+    tmp_path: Path,
+) -> None:
+    app = create_app(make_settings(tmp_path, cloudflare_browser_insights_enabled=True))
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.get("/")
+
+    content_security_policy = response.headers["content-security-policy"]
+    assert "script-src 'self' https://static.cloudflareinsights.com;" in content_security_policy
+    assert "connect-src 'self' https://cloudflareinsights.com;" in content_security_policy
+    assert "*.cloudflare" not in content_security_policy
 
 
 async def test_index_uses_dom_safe_rendering_and_memory_only_bearer_stream(

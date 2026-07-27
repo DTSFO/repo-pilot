@@ -175,6 +175,7 @@ jobs:
           assert environment["REPOPILOT_WORKSPACE_ROOT"] == "/workspace"
           assert environment["REPOPILOT_REPOSITORY_ROOT"] == "/repositories"
           assert environment["REPOPILOT_ALLOWED_REPOSITORY_ROOTS"] == "/workspace,/imports"
+          assert environment["REPOPILOT_CLOUDFLARE_BROWSER_INSIGHTS_ENABLED"] == "false"
           PY
           docker build -t repopilot:ci .
           test "$(docker image inspect repopilot:ci --format '{{.Config.User}}')" = "repopilot"

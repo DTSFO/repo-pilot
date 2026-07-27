@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- 增加默认关闭的 Cloudflare Browser Insights CSP 兼容开关；启用时只允许其固定脚本源与
+  上报源，避免边缘自动注入造成浏览器控制台 CSP 错误，同时不放宽其他部署的默认安全策略。
+
 ## 1.5.0 — 2026-07-27
 
 - 将标准模型集成迁移到 LangChain：`langchain-openai` 的 `ChatOpenAI` 负责 Messages、Tool

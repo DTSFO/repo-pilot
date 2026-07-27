@@ -121,6 +121,11 @@ uv run repopilot serve
 不会匿名开放。浏览器仅在当前页面内存保存输入的 Token；公开模式的普通访客只看到本页创建或凭
 不可猜测 UUID 主动打开的任务，刷新不会枚举共享历史。
 
+严格 CSP 默认只允许本站脚本和连接。如果部署域名启用了 Cloudflare Browser Insights 的边缘
+脚本注入，可显式设置 `REPOPILOT_CLOUDFLARE_BROWSER_INSIGHTS_ENABLED=true`；此开关只增加
+`https://static.cloudflareinsights.com` 脚本源和 `https://cloudflareinsights.com` 上报源，
+不使用 Cloudflare 通配域名。未启用 Browser Insights 的部署应保持默认 `false`。
+
 ## CLI
 
 ```bash
@@ -137,7 +142,7 @@ uv run repopilot eval                    # 跑固定离线评测并写 evals/rep
 
 v1.5 的当前发布版本在 2026-07-27 使用 deterministic Provider、固定 30-case 数据集重新运行：
 任务成功率、Recall@5、引用精确率/有效率和拒答准确率均为 `1.0`，unsupported answer、
-degraded 与 fallback case rate 均为 `0.0`。本机观测 P95 为 `400.532 ms`；这是离线
+degraded 与 fallback case rate 均为 `0.0`。本机观测 P95 为 `331.765 ms`；这是离线
 工作流/检索回归，不是线上 SLO，也不代表真实模型质量。评测 CLI 在一次性临时数据库中只摄取
 数据集声明的 `src/repopilot`，因此报告记录的是 33 个源码文档，不会读取产品库历史索引，也
 不会把基准语料写入产品库；产品库只保留最终 evaluation run 审计记录。报告同时保存

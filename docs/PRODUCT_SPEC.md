@@ -48,6 +48,8 @@ or provider-independent model quality.
 10. Every loop, retry, tool call, model step, timeout, and Token budget is finite.
 11. LangChain owns standard model integration concerns; RepoPilot owns product policy and never
     delegates authorization, evidence acceptance, or state-transition invariants to a model SDK.
+12. Third-party browser telemetry remains disabled by default; an edge-specific opt-in may extend CSP
+    only to the exact Cloudflare Browser Insights script and reporting origins.
 
 ## Primary user journeys
 
