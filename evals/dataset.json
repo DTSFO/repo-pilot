@@ -1,5 +1,6 @@
 {
   "schema_version": "1.1",
+  "corpus_path": "src/repopilot",
   "cases": [
     {
       "id": "runtime-retry",
@@ -129,7 +130,7 @@
     },
     {
       "id": "workflow-refusal",
-      "goal": "refuses unsupported conclusions without accepted evidence",
+      "goal": "workflow compose report accepted evidence index size no evidence refusal",
       "expected_source": "src/repopilot/workflow.py",
       "expected_keywords": [],
       "expect_refusal": false
@@ -143,8 +144,8 @@
     },
     {
       "id": "provider-openai",
-      "goal": "openai compatible chat completions httpx provider",
-      "expected_source": "src/repopilot/providers/openai_compatible.py",
+      "goal": "LangChain ChatOpenAI tool calling structured output streaming provider",
+      "expected_source": "src/repopilot/providers/langchain_openai.py",
       "expected_keywords": [],
       "expect_refusal": false
     },

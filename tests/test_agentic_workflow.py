@@ -288,6 +288,7 @@ async def test_model_plan_and_read_only_tool_drive_research(
     assert [request.purpose for request in provider.requests] == [
         "planner",
         "researcher",
+        "researcher",
         "reviewer",
         "writer",
     ]
@@ -301,6 +302,10 @@ async def test_model_plan_and_read_only_tool_drive_research(
         event.event == "tool" and event.metadata["tool"] == "search_repository"
         for event in result.trace
     )
+    research_requests = [
+        request for request in provider.requests if request.purpose == "researcher"
+    ]
+    assert any(message["role"] == "tool" for message in research_requests[1].messages)
 
 
 async def test_reviewer_receives_bounded_chunk_content_beyond_the_prefix(

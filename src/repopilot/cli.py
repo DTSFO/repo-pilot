@@ -5,6 +5,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from .config import Settings
@@ -14,7 +15,7 @@ from .observability import configure_logging
 from .providers.factory import build_provider
 from .repository_manager import RepositoryManager, RepositoryNotFoundError
 from .storage.database import Database
-from .storage.models import RepositoryRecord
+from .storage.models import EvaluationRunRecord, RepositoryRecord
 from .storage.repositories import DocumentStore
 
 
@@ -84,18 +85,56 @@ async def run_ingest(
 
 
 async def run_eval(settings: Settings, dataset: Path, output: Path) -> dict[str, Any]:
-    database = Database(settings.database_url)
-    await database.initialize()
-    provider = build_provider(settings)
-    try:
-        runner = EvaluationRunner(settings, database, provider)
-        result = await runner.run(dataset)
-        payload = json.dumps(result, ensure_ascii=False, indent=2)
-        await asyncio.to_thread(_write_report, output, payload)
-        return result
-    finally:
-        await provider.close()
-        await database.close()
+    # A benchmark must not read historical product documents or write its corpus into the
+    # application database. Keep the complete evaluation workload in a fresh database, then
+    # copy only its immutable run record into the configured database for audit/history views.
+    with TemporaryDirectory(prefix="repopilot-eval-") as directory:
+        evaluation_url = f"sqlite+aiosqlite:///{Path(directory) / 'evaluation.db'}"
+        evaluation_settings = settings.model_copy(update={"database_url": evaluation_url})
+        evaluation_database = Database(evaluation_url)
+        await evaluation_database.initialize()
+        provider = build_provider(evaluation_settings)
+        try:
+            runner = EvaluationRunner(evaluation_settings, evaluation_database, provider)
+            result = await runner.run(dataset)
+            payload = json.dumps(result, ensure_ascii=False, indent=2)
+            await asyncio.to_thread(_write_report, output, payload)
+
+            application_database = Database(settings.database_url)
+            await application_database.initialize()
+            try:
+                await _copy_evaluation_record(
+                    evaluation_database,
+                    application_database,
+                    result["run_id"],
+                )
+            finally:
+                await application_database.close()
+            return result
+        finally:
+            await provider.close()
+            await evaluation_database.close()
+
+
+async def _copy_evaluation_record(
+    source: Database,
+    destination: Database,
+    run_id: str,
+) -> None:
+    async with source.session() as session:
+        record = await session.get(EvaluationRunRecord, run_id)
+        if record is None:
+            raise RuntimeError(f"evaluation run was not persisted: {run_id}")
+        clone = EvaluationRunRecord(
+            id=record.id,
+            dataset_name=record.dataset_name,
+            configuration=dict(record.configuration),
+            metrics_json=dict(record.metrics_json),
+            status=record.status,
+            created_at=record.created_at,
+        )
+    async with destination.session() as session:
+        session.add(clone)
 
 
 async def run_repository_command(settings: Settings, command: str, arguments: Any) -> Any:

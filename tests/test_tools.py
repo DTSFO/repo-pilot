@@ -35,6 +35,44 @@ class ToolRegistryTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(InvalidToolArgumentsError):
             await registry.aexecute("echo", {})
 
+    async def test_execution_enforces_declared_json_schema_constraints(self) -> None:
+        registry = ToolRegistry()
+        registry.register(
+            "search",
+            "search",
+            lambda query, top_k=4: (query, top_k),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "minLength": 1},
+                    "top_k": {"type": "integer", "minimum": 1, "maximum": 10},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        )
+
+        self.assertEqual(await registry.aexecute("search", {"query": "retry"}), ("retry", 4))
+        for invalid in (
+            {"query": ""},
+            {"query": "retry", "top_k": 0},
+            {"query": "retry", "top_k": 11},
+            {"query": "retry", "top_k": "4"},
+            {"query": "retry", "unexpected": True},
+        ):
+            with self.subTest(arguments=invalid), self.assertRaises(InvalidToolArgumentsError):
+                await registry.aexecute("search", invalid)
+
+    def test_registration_rejects_invalid_json_schema(self) -> None:
+        registry = ToolRegistry()
+        with self.assertRaises(ValueError):
+            registry.register(
+                "broken",
+                "broken",
+                lambda value: value,
+                parameters={"type": "not-a-json-schema-type"},
+            )
+
     async def test_transient_system_error_is_retryable(self) -> None:
         registry = ToolRegistry()
 

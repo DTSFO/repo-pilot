@@ -18,3 +18,4 @@ data/uploads/
 data/index/
 frontend/node_modules/
 frontend/dist/
+.ace-tool/

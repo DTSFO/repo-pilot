@@ -1,8 +1,75 @@
-# RepoPilot v1.4 Release Gates
+# RepoPilot v1.5 Release Gates
 
-`v1.0.0` through `v1.3.0` are frozen historical releases. Their acceptance numbers, artifact hashes,
-and image digests must not be rewritten. Before publishing v1.4, all of these gates must be backed by
-command output or inspectable tests:
+Historical acceptance numbers, artifact hashes, and image digests must not be rewritten. Every
+v1.5 checkbox must be backed by command output, an inspectable test, or a generated artifact against
+the final candidate.
+
+## v1.5 architecture and dependency boundary
+
+- [x] `langchain-core` and `langchain-openai` are used by the production path for messages,
+  `ChatOpenAI`, Tool Calling, Pydantic structured output, streaming aggregation, usage, and SDK error
+  mapping; no unused `langchain` meta-package is installed.
+- [x] The compiled LangGraph remains the only top-level control plane. Planner → Researcher ⇄
+  Reviewer → Writer topology, conditional revision, checkpoint ownership, and task terminal status
+  remain explicit and inspectable.
+- [x] Production Researcher calls the same `ToolCallingHarness` tested in isolation and performs a
+  real model → tool → observation → model loop. Only registered read-only repository tools execute.
+- [x] `langchain.agents.create_agent` is intentionally absent and ADR 0001 records the Build-vs-Buy
+  decision, rejected alternatives, Provider compatibility boundary, and migration impact.
+- [x] Planner and Reviewer typed responses pass both Pydantic validation and RepoPilot business
+  rules; semantic review cannot promote evidence rejected by the deterministic hard gate.
+- [x] The old `openai_compatible` setting and `OpenAICompatibleProvider` import are tested aliases,
+  not separate implementations. Documentation recommends `langchain_openai`.
+- [x] Unused direct runtime dependencies and dead teaching/demo modules are absent from the package.
+
+## v1.5 correctness, safety, and evidence
+
+- [x] Full unit/integration/API suite passes with no unexpected skips; branch coverage is at least
+  85%, and Ruff, format check, strict Mypy, lockfile check, and dependency compatibility all pass.
+- [x] Provider tests cover non-streaming text, streaming text/tool-call aggregation, structured
+  output, usage/estimation, lifecycle telemetry, health, error mapping, redaction, cancellation,
+  retry, circuit breaking, and deterministic fallback provenance.
+- [x] Fallback usage estimation includes the forced function Schema used for Planner/Reviewer
+  structured output, so token-budget enforcement does not systematically undercount those calls.
+- [x] Evidence API returns `repository_id` and `revision_id`, and every persisted evidence row is
+  demonstrably scoped to the task's immutable repository revision.
+- [x] Tool permissions, per-step and task-global call budgets, Token budget, repeated-call guard,
+  timeouts, fallback, corpus drift, citation validation, guarded/degraded semantics, cancellation,
+  resume, and SSE replay remain covered.
+- [x] The current 30-case deterministic evaluation is rerun after the provider/module changes; the
+  report records the new dataset and corpus fingerprints, Top-5 sources, accurate metric semantics,
+  and observed latency without reusing an older release's numbers.
+- [x] CLI evaluation runs in a fresh temporary database scoped to the dataset `corpus_path`; product
+  documents cannot contaminate the benchmark and benchmark documents cannot enter the product
+  database, while the final immutable evaluation-run record remains persisted for audit history.
+- [x] Documentation states that BM25 plus a weak deterministic hash bonus is not a learned embedding
+  or reranker, SQLite polling SSE is not a cross-replica event bus, and checkpointing is not
+  exactly-once Provider execution.
+
+## v1.5 delivery and deployment
+
+- [x] Real Chromium desktop/mobile product flow passes, including repository onboarding, indexing,
+  task/SSE behavior, sanitized report rendering, and all exports without console errors.
+- [x] Wheel and sdist are built twice into clean directories, independently inspected, byte-for-byte
+  reproducible, secret-clean, metadata-consistent at 1.5.0, and install successfully in a clean venv.
+- [x] Docker build/check and Compose validation pass; hardened container smoke proves non-root,
+  read-only rootfs, dropped capabilities, `no-new-privileges`, writable-data-only, and `/ready`.
+- [x] Compose resolves the application workspace to the read-only `/workspace` mount, limits local
+  onboarding to `/workspace,/imports`, and persists Git clones/database state under
+  `/repositories` and `/app/data`; the product smoke ingests the mounted checkout rather than the
+  image source tree.
+- [x] An existing legacy default repository relocates from the old mounted root to `/workspace`
+  without deleting history: the stale active revision pointer is invalidated, paths are updated,
+  fallback cannot select an old-root revision, fresh databases expose no synthetic ready revision,
+  and later startups preserve the newly indexed revision.
+- [ ] Source diff is reviewed, committed, and pushed to `main`; the ddhweb `repo-pilot` service is
+  synchronized from that revision and its online health, API/UI, and deployed revision are verified.
+
+---
+
+# RepoPilot v1.4 Historical Release Gates
+
+The following v1.4 record is historical and must not be interpreted as v1.5 evidence.
 
 ## v1.4 repository, revision and report gates
 

@@ -10,21 +10,29 @@ from repopilot.config import Settings
 from repopilot.models import AgentRunResult, ModelResponse, ToolCall, TraceEvent
 from repopilot.providers.deterministic import DeterministicProvider
 from repopilot.providers.telemetry import ProviderEvent, emit_provider_event
-from repopilot.runtime import AsyncAgentRuntime
+from repopilot.runtime import ToolCallingHarness
 from repopilot.service import TaskService, TaskStateError, _safe_provider_event_payload
 from repopilot.storage import Database, TaskStore
 from repopilot.storage.models import CheckpointRecord
-from repopilot.tools import ToolRegistry, add, multiply
+from repopilot.tools import ToolRegistry
 
 
-def make_runtime(provider: DeterministicProvider, **overrides: object) -> AsyncAgentRuntime:
+def add(a: float, b: float) -> float:
+    return a + b
+
+
+def multiply(a: float, b: float) -> float:
+    return a * b
+
+
+def make_runtime(provider: DeterministicProvider, **overrides: object) -> ToolCallingHarness:
     settings = Settings.model_validate(
         {"provider": "deterministic", "tool_retry_base_seconds": 0.0, **overrides}
     )
     tools = ToolRegistry()
     tools.register("add", "计算两个数字之和", add)
     tools.register("multiply", "计算两个数字之积", multiply)
-    return AsyncAgentRuntime(provider, tools, settings)
+    return ToolCallingHarness(provider, tools, settings)
 
 
 @pytest.fixture

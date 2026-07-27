@@ -159,7 +159,8 @@ jobs:
           from pathlib import Path
 
           payload = json.loads(Path("/tmp/repopilot-compose.json").read_text())
-          ports = payload["services"]["repopilot"]["ports"]
+          service = payload["services"]["repopilot"]
+          ports = service["ports"]
           assert ports == [{
               "mode": "ingress",
               "target": 8000,
@@ -167,6 +168,13 @@ jobs:
               "protocol": "tcp",
               "host_ip": "127.0.0.1",
           }]
+          environment = service["environment"]
+          assert environment["REPOPILOT_DATABASE_URL"] == (
+              "sqlite+aiosqlite:////app/data/repopilot.db"
+          )
+          assert environment["REPOPILOT_WORKSPACE_ROOT"] == "/workspace"
+          assert environment["REPOPILOT_REPOSITORY_ROOT"] == "/repositories"
+          assert environment["REPOPILOT_ALLOWED_REPOSITORY_ROOTS"] == "/workspace,/imports"
           PY
           docker build -t repopilot:ci .
           test "$(docker image inspect repopilot:ci --format '{{.Config.User}}')" = "repopilot"

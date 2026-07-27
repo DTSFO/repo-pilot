@@ -13,7 +13,8 @@ from repopilot.repository_manager import (
     RepositorySyncError,
 )
 from repopilot.storage.database import Database
-from repopilot.storage.repositories import DocumentStore
+from repopilot.storage.models import LEGACY_REPOSITORY_ID
+from repopilot.storage.repositories import DocumentStore, RepositoryStore
 
 
 def manager_settings(tmp_path: Path) -> Settings:
@@ -27,6 +28,52 @@ def manager_settings(tmp_path: Path) -> Settings:
             "repository_sync_timeout_seconds": 1,
         }
     )
+
+
+async def test_legacy_workspace_relocation_invalidates_only_active_index(
+    tmp_path: Path,
+) -> None:
+    old_root = tmp_path / "old-workspace"
+    new_root = tmp_path / "new-workspace"
+    old_root.mkdir()
+    new_root.mkdir()
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/relocation.db")
+    await database.initialize(legacy_root=str(old_root))
+    store = RepositoryStore(database)
+    try:
+        original = await store.ensure_legacy(str(old_root))
+        old_revision = await store.create_revision(
+            original.id,
+            revision="old-tree",
+            root_path=str(old_root),
+        )
+        await store.finish_revision(old_revision.id, status="ready", stats={})
+
+        relocated = await store.ensure_legacy(str(new_root))
+
+        assert relocated.id == LEGACY_REPOSITORY_ID
+        assert relocated.identity_key == f"legacy:{new_root}"
+        assert relocated.source_location == str(new_root)
+        assert relocated.root_path == str(new_root)
+        assert relocated.indexed_revision_id is None
+        assert relocated.metadata_json["legacy"] is True
+        assert await store.get_revision(old_revision.id) is not None
+        assert await store.get_latest_ready_revision(relocated.id) is None
+
+        new_revision = await store.create_revision(
+            relocated.id,
+            revision="new-tree",
+            root_path=str(new_root),
+        )
+        await store.finish_revision(new_revision.id, status="ready", stats={})
+
+        unchanged = await store.ensure_legacy(str(new_root))
+        assert unchanged.indexed_revision_id == new_revision.id
+        latest = await store.get_latest_ready_revision(unchanged.id)
+        assert latest is not None
+        assert latest.id == new_revision.id
+    finally:
+        await database.close()
 
 
 async def test_refresh_failure_preserves_and_retry_replaces_ready_revision(

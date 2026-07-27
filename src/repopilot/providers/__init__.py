@@ -1,6 +1,7 @@
 from .base import ModelProvider, ModelRequest, ProviderHealth
 from .deterministic import DeterministicProvider
 from .factory import build_provider
+from .langchain_openai import LangChainOpenAIProvider
 from .openai_compatible import OpenAICompatibleProvider
 from .resilient import CircuitBreaker, ResilientProvider, RetryPolicy
 from .telemetry import ProviderCallContext, ProviderEvent, ProviderEventSink, provider_event_sink
@@ -8,6 +9,7 @@ from .telemetry import ProviderCallContext, ProviderEvent, ProviderEventSink, pr
 __all__ = [
     "CircuitBreaker",
     "DeterministicProvider",
+    "LangChainOpenAIProvider",
     "ModelProvider",
     "ModelRequest",
     "OpenAICompatibleProvider",

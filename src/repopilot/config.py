@@ -19,7 +19,7 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    provider: Literal["deterministic", "openai_compatible"] = "deterministic"
+    provider: Literal["deterministic", "langchain_openai", "openai_compatible"] = "deterministic"
     llm_base_url: str | None = None
     llm_api_key: SecretStr | None = None
     llm_model: str | None = None
@@ -40,7 +40,6 @@ class Settings(BaseSettings):
     llm_circuit_recovery_seconds: float = Field(default=30.0, gt=0, le=3600)
 
     database_url: str = "sqlite+aiosqlite:///./data/repopilot.db"
-    redis_url: str | None = None
     workspace_root: Path = Path(".")
     repository_root: Path = Path("./data/repositories")
     allowed_repository_roots: str = ""
@@ -50,6 +49,7 @@ class Settings(BaseSettings):
     daily_quota_timezone: str = "UTC"
     max_steps: int = Field(default=12, ge=1, le=100)
     max_tool_calls: int = Field(default=40, ge=1, le=1000)
+    max_tool_calls_per_step: int = Field(default=4, ge=1, le=32)
     max_total_tokens: int = Field(default=100_000, ge=1, le=10_000_000)
     max_review_rounds: int = Field(default=2, ge=0, le=10)
     tool_timeout_seconds: float = Field(default=20.0, gt=0, le=300)
@@ -72,10 +72,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_provider_configuration(self) -> Self:
-        if self.provider == "openai_compatible" and (
+        if self.provider in {"langchain_openai", "openai_compatible"} and (
             not self.llm_base_url or not self.llm_model or self.llm_api_key is None
         ):
-            raise ValueError("openai_compatible requires LLM_BASE_URL, LLM_MODEL, and LLM_API_KEY")
+            raise ValueError("langchain_openai requires LLM_BASE_URL, LLM_MODEL, and LLM_API_KEY")
         if self.llm_retry_max_seconds < self.llm_retry_base_seconds:
             raise ValueError("LLM_RETRY_MAX_SECONDS must be >= LLM_RETRY_BASE_SECONDS")
         try:

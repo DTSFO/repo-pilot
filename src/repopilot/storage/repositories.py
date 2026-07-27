@@ -237,6 +237,7 @@ class RepositoryStore:
         self.database = database
 
     async def ensure_legacy(self, root_path: str) -> RepositoryRecord:
+        identity_key = f"legacy:{root_path}"
         async with self.database.session() as session:
             record = await session.get(RepositoryRecord, LEGACY_REPOSITORY_ID)
             if record is None:
@@ -244,7 +245,7 @@ class RepositoryStore:
                     id=LEGACY_REPOSITORY_ID,
                     name="Default workspace",
                     source_type="local",
-                    identity_key=f"legacy:{root_path}",
+                    identity_key=identity_key,
                     source_location=root_path,
                     root_path=root_path,
                     status="ready",
@@ -252,10 +253,23 @@ class RepositoryStore:
                 )
                 session.add(record)
                 await session.flush()
-            elif not record.metadata_json.get("legacy"):
+            else:
+                relocated = (
+                    record.identity_key != identity_key
+                    or record.source_location != root_path
+                    or record.root_path != root_path
+                )
                 record.metadata_json = {**record.metadata_json, "legacy": True}
+                record.identity_key = identity_key
                 record.source_location = root_path
                 record.root_path = root_path
+                if relocated:
+                    # The previous revision remains immutable history, but it cannot be the
+                    # active index for a different mounted workspace. Clearing only the pointer
+                    # forces an explicit refresh without deleting tasks, evidence or revisions.
+                    record.indexed_revision_id = None
+                    record.status = "ready"
+                    record.last_error = None
                 await session.flush()
             return record
 
@@ -421,9 +435,14 @@ class RepositoryStore:
         async with self.database.session() as session:
             result = await session.scalars(
                 select(RepositoryRevisionRecord)
+                .join(
+                    RepositoryRecord,
+                    RepositoryRecord.id == RepositoryRevisionRecord.repository_id,
+                )
                 .where(
                     RepositoryRevisionRecord.repository_id == repository_id,
                     RepositoryRevisionRecord.status == "ready",
+                    RepositoryRevisionRecord.root_path == RepositoryRecord.root_path,
                 )
                 .order_by(
                     RepositoryRevisionRecord.completed_at.desc(),

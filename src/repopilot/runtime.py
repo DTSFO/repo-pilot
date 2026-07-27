@@ -19,8 +19,12 @@ logger = logging.getLogger(__name__)
 StepCallback = Callable[[int, list[dict[str, Any]], list[TraceEvent]], Awaitable[None]]
 
 
-class AsyncAgentRuntime:
-    """Provider-neutral asynchronous agent loop with safe tool orchestration."""
+class ToolCallingHarness:
+    """Bounded inner model/tool loop used by the Researcher role.
+
+    LangGraph owns role transitions. This Harness owns model observations,
+    tool validation/execution, retries, duplicate detection and local budgets.
+    """
 
     def __init__(self, provider: ModelProvider, tools: ToolRegistry, settings: Settings) -> None:
         self.provider = provider
@@ -36,19 +40,16 @@ class AsyncAgentRuntime:
         task_id: str | None = None,
         repository_id: str | None = None,
         revision_id: str | None = None,
+        purpose: str | None = None,
     ) -> AgentRunResult:
-        """Run the agent loop.
+        """Run until the model stops or a hard Harness limit is reached."""
 
-        ``initial_messages`` restores a conversation from a durable checkpoint;
-        ``on_step`` receives the message snapshot and the trace events produced
-        during each completed step so callers can persist checkpoints and events;
-        ``task_id`` is an optional correlation id used only for logging.
-        """
         del task_id, repository_id, revision_id
-        if initial_messages:
-            messages: list[dict[str, Any]] = [dict(message) for message in initial_messages]
-        else:
-            messages = [{"role": "user", "content": user_input}]
+        messages = (
+            [dict(message) for message in initial_messages]
+            if initial_messages
+            else [{"role": "user", "content": user_input}]
+        )
         trace: list[TraceEvent] = []
         emitted_trace = 0
         seen_calls: set[str] = set()
@@ -66,10 +67,23 @@ class AsyncAgentRuntime:
 
         try:
             for step in range(1, self.settings.max_steps + 1):
+                remaining_tokens = self.settings.max_total_tokens - total_tokens
+                if remaining_tokens <= 0:
+                    return self._guard_result(
+                        "Stopped before the next model call because the token budget is exhausted.",
+                        messages,
+                        trace,
+                        step,
+                        total_tokens,
+                        degraded,
+                    )
+
                 response = await self.provider.complete(
                     ModelRequest(
                         messages=tuple(messages),
                         tools=tuple(self.tools.descriptions()),
+                        max_tokens=max(1, min(2048, remaining_tokens)),
+                        purpose=purpose,
                     )
                 )
                 total_tokens += response.usage.total_tokens if response.usage else 0
@@ -96,6 +110,16 @@ class AsyncAgentRuntime:
                         tuple(trace),
                         step,
                         "completed",
+                        total_tokens,
+                        degraded,
+                    )
+
+                if len(response.tool_calls) > self.settings.max_tool_calls_per_step:
+                    return self._guard_result(
+                        "Stopped because one model response exceeded the per-step tool-call limit.",
+                        messages,
+                        trace,
+                        step,
                         total_tokens,
                         degraded,
                     )
@@ -364,3 +388,9 @@ class AsyncAgentRuntime:
     @staticmethod
     def _elapsed_ms(started_at: float) -> float:
         return round((perf_counter() - started_at) * 1000, 3)
+
+
+# Source-compatible alias for integrations written against v1.4.
+AsyncAgentRuntime = ToolCallingHarness
+
+__all__ = ["AsyncAgentRuntime", "StepCallback", "ToolCallingHarness"]

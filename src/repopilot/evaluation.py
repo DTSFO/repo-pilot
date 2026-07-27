@@ -135,6 +135,12 @@ class EvaluationRunner:
         dataset_bytes = await asyncio.to_thread(dataset_path.read_bytes)
         dataset_payload = json.loads(dataset_bytes)
         cases = _parse_dataset(dataset_payload)
+        configured_corpus_path = dataset_payload.get("corpus_path")
+        if configured_corpus_path is not None and (
+            not isinstance(configured_corpus_path, str) or not configured_corpus_path.strip()
+        ):
+            raise ValueError("Evaluation corpus_path must be a non-empty relative path")
+        corpus_path = configured_corpus_path.strip() if configured_corpus_path is not None else None
         generated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         dataset_metadata = {
             "name": dataset_name or dataset_path.stem,
@@ -142,8 +148,9 @@ class EvaluationRunner:
             "schema_version": dataset_payload.get("schema_version"),
             "fingerprint": sha256(dataset_bytes).hexdigest(),
             "cases": len(cases),
+            "corpus_path": corpus_path or ".",
         }
-        await RepositoryIngestor(self.documents, self.settings).ingest_path()
+        await RepositoryIngestor(self.documents, self.settings).ingest_path(corpus_path)
         latest_documents = await self.documents.latest_documents()
         line_counts = {
             document.source_uri: document.content.count("\n") + 1 for document in latest_documents
@@ -184,10 +191,12 @@ class EvaluationRunner:
         run_config = {
             "orchestrator": "langgraph",
             "graph_name": "repopilot-research-workflow",
+            "corpus_path": corpus_path or ".",
             "recall_k": RECALL_K,
             "max_review_rounds": self.settings.max_review_rounds,
             "max_steps": self.settings.max_steps,
             "max_tool_calls": self.settings.max_tool_calls,
+            "max_tool_calls_per_step": self.settings.max_tool_calls_per_step,
             "max_total_tokens": self.settings.max_total_tokens,
             "tool_timeout_seconds": self.settings.tool_timeout_seconds,
             "llm_max_attempts": self.settings.llm_max_attempts,

@@ -95,6 +95,8 @@ async def test_research_task_produces_cited_report_and_evidence(
     accepted = [item for item in evidence if item["review_status"] == "accepted"]
     assert accepted
     assert all(":L" in item["citation"] for item in accepted)
+    assert all(item["repository_id"] == body["repository_id"] for item in evidence)
+    assert all(item["revision_id"] == body["revision_id"] for item in evidence)
 
 
 async def test_unrelated_goal_refuses_unsupported_conclusions(

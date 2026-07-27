@@ -94,7 +94,7 @@ class McpServer:
                 {
                     "protocolVersion": PROTOCOL_VERSION,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "repopilot", "version": "1.4.0"},
+                    "serverInfo": {"name": "repopilot", "version": "1.5.0"},
                 },
             )
         if method == "notifications/initialized":
@@ -220,6 +220,7 @@ class McpServer:
             revision is None
             or revision.repository_id != repository.id
             or revision.status != "ready"
+            or revision.root_path != repository.root_path
         ):
             revision = await self.repositories.get_latest_ready_revision(repository.id)
         if revision is None:

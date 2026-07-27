@@ -8,7 +8,7 @@ from repopilot.errors import ProviderUnavailableError
 from repopilot.models import ModelResponse, TokenUsage, ToolCall
 from repopilot.providers import DeterministicProvider
 from repopilot.providers.base import ModelRequest, ProviderHealth
-from repopilot.runtime import AsyncAgentRuntime
+from repopilot.runtime import AsyncAgentRuntime, ToolCallingHarness
 from repopilot.tools import ToolRegistry
 
 
@@ -22,12 +22,15 @@ def settings(**overrides: object) -> Settings:
     return Settings(_env_file=None, **values)
 
 
-class AsyncAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
+class ToolCallingHarnessTest(unittest.IsolatedAsyncioTestCase):
+    def test_legacy_runtime_name_is_a_compatibility_alias(self) -> None:
+        self.assertIs(AsyncAgentRuntime, ToolCallingHarness)
+
     async def test_direct_answer_completes(self) -> None:
         provider = DeterministicProvider(
             [ModelResponse(text="final", usage=TokenUsage(total_tokens=7))]
         )
-        runtime = AsyncAgentRuntime(provider, ToolRegistry(), settings())
+        runtime = ToolCallingHarness(provider, ToolRegistry(), settings())
 
         result = await runtime.run("question")
 
@@ -39,7 +42,7 @@ class AsyncAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         provider = DeterministicProvider(
             [ModelResponse(text="fallback answer", fallback_used=True)]
         )
-        runtime = AsyncAgentRuntime(provider, ToolRegistry(), settings())
+        runtime = ToolCallingHarness(provider, ToolRegistry(), settings())
 
         result = await runtime.run("question")
 
@@ -74,7 +77,7 @@ class AsyncAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 ModelResponse(text="combined"),
             ]
         )
-        runtime = AsyncAgentRuntime(provider, tools, settings())
+        runtime = ToolCallingHarness(provider, tools, settings())
 
         result = await runtime.run("research")
 
@@ -110,7 +113,7 @@ class AsyncAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        result = await AsyncAgentRuntime(provider, tools, settings()).run("write")
+        result = await ToolCallingHarness(provider, tools, settings()).run("write")
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(max_active, 1)
@@ -134,7 +137,7 @@ class AsyncAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        result = await AsyncAgentRuntime(provider, tools, settings()).run("retry")
+        result = await ToolCallingHarness(provider, tools, settings()).run("retry")
 
         self.assertEqual(attempts, 2)
         self.assertTrue(any(event.event == "retry" for event in result.trace))
@@ -157,7 +160,7 @@ class AsyncAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertLogs("repopilot.runtime", level="ERROR"):
-            result = await AsyncAgentRuntime(provider, tools, settings()).run("partial")
+            result = await ToolCallingHarness(provider, tools, settings()).run("partial")
 
         self.assertTrue(result.degraded)
         public_messages = " ".join(str(message) for message in result.messages)
@@ -170,7 +173,7 @@ class AsyncAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         repeated = ModelResponse(tool_calls=(ToolCall("echo", {"text": "x"}, "call"),))
         provider = DeterministicProvider([repeated, repeated])
 
-        result = await AsyncAgentRuntime(provider, tools, settings()).run("repeat")
+        result = await ToolCallingHarness(provider, tools, settings()).run("repeat")
 
         self.assertEqual(result.status, "guarded")
         self.assertIn("Repeated tool call blocked", result.answer)
@@ -189,7 +192,7 @@ class AsyncAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        result = await AsyncAgentRuntime(
+        result = await ToolCallingHarness(
             provider,
             tools,
             settings(tool_timeout_seconds=0.01),
@@ -201,7 +204,7 @@ class AsyncAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tool_timeout", str(tool_message["content"]))
 
     async def test_token_and_tool_call_budgets_fail_closed(self) -> None:
-        token_result = await AsyncAgentRuntime(
+        token_result = await ToolCallingHarness(
             DeterministicProvider(
                 [ModelResponse(text="over budget", usage=TokenUsage(total_tokens=11))]
             ),
@@ -213,7 +216,7 @@ class AsyncAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         tools = ToolRegistry()
         tools.register("echo", "echo", lambda text: text)
-        tool_result = await AsyncAgentRuntime(
+        tool_result = await ToolCallingHarness(
             DeterministicProvider(
                 [
                     ModelResponse(
@@ -240,7 +243,7 @@ class AsyncAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         tools = ToolRegistry()
         tools.register("slow", "slow", slow)
-        runtime = AsyncAgentRuntime(
+        runtime = ToolCallingHarness(
             DeterministicProvider(
                 [ModelResponse(tool_calls=(ToolCall("slow", {}, "slow-cancel"),))]
             ),
@@ -268,9 +271,9 @@ class FailedProvider:
         return None
 
 
-class FailedProviderRuntimeTest(unittest.IsolatedAsyncioTestCase):
+class FailedProviderHarnessTest(unittest.IsolatedAsyncioTestCase):
     async def test_provider_failure_becomes_safe_failed_result(self) -> None:
-        runtime = AsyncAgentRuntime(FailedProvider(), ToolRegistry(), settings())
+        runtime = ToolCallingHarness(FailedProvider(), ToolRegistry(), settings())
 
         with self.assertLogs("repopilot.runtime", level="ERROR"):
             result = await runtime.run("question")

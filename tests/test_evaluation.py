@@ -16,6 +16,7 @@ def test_dataset_has_thirty_unique_cases() -> None:
     payload = json.loads(Path("evals/dataset.json").read_text(encoding="utf-8"))
     cases = load_dataset(Path("evals/dataset.json"))
     assert payload["schema_version"] == "1.1"
+    assert payload["corpus_path"] == "src/repopilot"
     assert len(cases) == 30
     assert sum(case.expect_refusal for case in cases) == 6
 
@@ -59,22 +60,29 @@ def test_source_labels_do_not_match_test_filename_substrings() -> None:
 async def test_eval_runner_on_small_corpus(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    (workspace / "auth.py").write_text(
+    benchmark = workspace / "benchmark"
+    benchmark.mkdir()
+    (benchmark / "auth.py").write_text(
         "def verify_token(token):\n    '''Bearer token verification for the API.'''\n",
+        encoding="utf-8",
+    )
+    (workspace / "distractor.md").write_text(
+        "bearer token verification should not enter the benchmark corpus\n",
         encoding="utf-8",
     )
     dataset = tmp_path / "dataset.json"
     dataset.write_text(
         json.dumps(
             {
+                "corpus_path": "benchmark",
                 "cases": [
                     {
                         "id": "hit",
                         "goal": "bearer token verification",
-                        "expected_source": "auth.py",
+                        "expected_source": "benchmark/auth.py",
                     },
                     {"id": "miss", "goal": "今晚吃什么好呢", "expect_refusal": True},
-                ]
+                ],
             },
             ensure_ascii=False,
         ),
@@ -105,17 +113,20 @@ async def test_eval_runner_on_small_corpus(tmp_path: Path) -> None:
         "models_observed": [],
     }
     assert result["dataset_metadata"]["path"] == str(dataset)
+    assert result["dataset_metadata"]["corpus_path"] == "benchmark"
     assert len(result["dataset_metadata"]["fingerprint"]) == 64
     assert result["run_config"]["orchestrator"] == "langgraph"
     assert result["run_config"]["graph_name"] == "repopilot-research-workflow"
+    assert result["run_config"]["corpus_path"] == "benchmark"
     assert result["run_config"]["recall_k"] == 5
+    assert result["run_config"]["max_tool_calls_per_step"] == settings.max_tool_calls_per_step
     assert result["corpus"]["documents"] == 1
     assert len(result["corpus"]["fingerprint"]) == 64
     assert metrics["cases"] == 2
     assert metrics["recall_at_5"] == 1.0
     assert metrics["refusal_accuracy"] == 1.0
     assert metrics["task_success_rate"] == 1.0
-    assert result["cases"][0]["top_sources"] == ("auth.py",)
+    assert result["cases"][0]["top_sources"] == ("benchmark/auth.py",)
     assert metrics["degraded_cases"] == 0
     assert metrics["fallback_responses"] == 0
     assert metrics["revision_requested_cases"] == 0

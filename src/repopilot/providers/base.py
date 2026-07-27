@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from pydantic import BaseModel
+
 from ..models import ModelResponse
 
 Message = dict[str, Any]
@@ -13,9 +15,16 @@ ToolSchema = dict[str, Any]
 class ModelRequest:
     messages: tuple[Message, ...]
     tools: tuple[ToolSchema, ...] = ()
+    response_schema: type[BaseModel] | None = None
     temperature: float = 0.0
     max_tokens: int = 2048
     purpose: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.tools and self.response_schema is not None:
+            raise ValueError("tools and response_schema are mutually exclusive")
+        if self.max_tokens < 1:
+            raise ValueError("max_tokens must be positive")
 
 
 @dataclass(frozen=True)

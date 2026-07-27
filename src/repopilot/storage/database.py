@@ -111,10 +111,26 @@ class Database:
                     text(f"UPDATE {table} SET repository_id = :id WHERE repository_id IS NULL"),
                     {"id": legacy_id},
                 )
+        # Only pre-v1.4 rows need a synthetic revision. create_all() also calls this
+        # migration for a brand-new database; publishing an empty legacy revision there
+        # would make the default workspace look indexed before its first real scan.
+        scoped_tables = tuple(
+            table
+            for table in ("research_tasks", "source_documents", "evidence")
+            if table in tables and "revision_id" in columns_by_table.get(table, set())
+        )
+        needs_legacy_revision = any(
+            connection.execute(
+                text(f"SELECT 1 FROM {table} WHERE revision_id IS NULL LIMIT 1")
+            ).first()
+            is not None
+            for table in scoped_tables
+        )
+
         # Legacy rows need a concrete revision as NULL participates specially
         # in SQLite UNIQUE constraints (and would allow duplicate rows).
         legacy_revision_id = "00000000-0000-0000-0000-000000000002"
-        if "repository_revisions" in tables:
+        if "repository_revisions" in tables and needs_legacy_revision:
             rev_exists = connection.execute(
                 text("SELECT 1 FROM repository_revisions WHERE id = :id"),
                 {"id": legacy_revision_id},
@@ -134,12 +150,11 @@ class Database:
                         "root_path": legacy_root,
                     },
                 )
-        for table in ("research_tasks", "source_documents", "evidence"):
-            if table in tables and "revision_id" in columns_by_table.get(table, set()):
-                connection.execute(
-                    text(f"UPDATE {table} SET revision_id = :id WHERE revision_id IS NULL"),
-                    {"id": legacy_revision_id},
-                )
+        for table in scoped_tables:
+            connection.execute(
+                text(f"UPDATE {table} SET revision_id = :id WHERE revision_id IS NULL"),
+                {"id": legacy_revision_id},
+            )
 
         connection.execute(
             text(

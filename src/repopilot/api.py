@@ -219,6 +219,8 @@ class ReportResponse(BaseModel):
 
 class EvidenceResponse(BaseModel):
     id: str
+    repository_id: str | None
+    revision_id: str | None
     claim: str
     quote: str
     source_uri: str
@@ -230,6 +232,8 @@ class EvidenceResponse(BaseModel):
     def from_record(cls, record: EvidenceRecord) -> EvidenceResponse:
         return cls(
             id=record.id,
+            repository_id=record.repository_id,
+            revision_id=record.revision_id,
             claim=record.claim,
             quote=record.quote,
             source_uri=record.source_uri,
@@ -317,7 +321,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await provider.close()
             await database.close()
 
-    app = FastAPI(title="RepoPilot", version="1.4.0", lifespan=lifespan)
+    app = FastAPI(title="RepoPilot", version="1.5.0", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
     @app.middleware("http")
@@ -374,6 +378,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             revision is None
             or revision.repository_id != repository.id
             or revision.status != "ready"
+            or revision.root_path != repository.root_path
         ):
             revision = await store.get_latest_ready_revision(repository.id)
         return RepositoryResponse.from_record(repository, revision)
@@ -391,6 +396,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             revision is None
             or revision.repository_id != repository.id
             or revision.status != "ready"
+            or revision.root_path != repository.root_path
         ):
             revision = await store.get_latest_ready_revision(repository.id)
         if revision is None and not repository.metadata_json.get("legacy"):

@@ -1,6 +1,6 @@
-# RepoPilot v1.4 Product Specification
+# RepoPilot v1.5 Product Specification
 
-## v1.4 user journey
+## v1.5 user journey
 
 1. Register one or more server-visible repositories from the UI, CLI or REST API. Local paths are
    constrained to an allowlist; Git onboarding accepts only HTTPS URLs without embedded credentials.
@@ -46,6 +46,8 @@ or provider-independent model quality.
    response IDs, raw errors, token deltas, and tool arguments are excluded.
 9. Tool and Token budgets are task-global across all revision rounds; a revision never resets them.
 10. Every loop, retry, tool call, model step, timeout, and Token budget is finite.
+11. LangChain owns standard model integration concerns; RepoPilot owns product policy and never
+    delegates authorization, evidence acceptance, or state-transition invariants to a model SDK.
 
 ## Primary user journeys
 
@@ -69,8 +71,11 @@ or provider-independent model quality.
 - Role internals remain model-driven: graph routing defines responsibility and termination, while
   the Researcher model chooses allowed tools from observations inside its bounded node loop.
 - Live-model Planner emits schema-validated queries, subquestions, and completion criteria.
+- Planner and Reviewer use LangChain Pydantic structured output; successful schema decoding still
+  passes RepoPilot's local count, membership, novelty, and policy checks.
 - Invalid/fallback Planner output safely selects a bounded deterministic plan.
-- Live-model Researcher selects only registered read-only repository search/read tools.
+- Live-model Researcher receives registered tools through LangChain Tool Calling and executes them
+  only through the shared RepoPilot `ToolCallingHarness`.
 - Tool arguments use explicit JSON Schema and fail closed for unknown tools or invalid input.
 - Deterministic hard review validates corpus freshness, deduplication, score, coverage, and citation.
 - Live-model Reviewer evaluates relevance/entailment only inside the hard-gate candidate set.
@@ -83,16 +88,24 @@ or provider-independent model quality.
 
 ### Runtime and persistence
 
-- Provider-neutral asynchronous model client with deterministic offline mode.
-- OpenAI-compatible Provider configured only through environment variables.
-- Buffered upstream Provider SSE by default: merge/validate text, fragmented tool calls, finish
-  reason, served model, and usage before exposing one complete `ModelResponse` to a role.
+- Existing default-workspace records survive mount relocation: update the legacy repository path,
+  preserve historical tasks/evidence/revisions, and require a fresh index before new tasks use the
+  relocated workspace. A fresh database must not advertise an unscanned synthetic revision.
+- Provider-neutral RepoPilot contract with deterministic offline mode and a LangChain-backed live
+  implementation.
+- `langchain-core` provides message/Runnable contracts; `langchain-openai` provides `ChatOpenAI`,
+  Tool Calling, Pydantic structured output, SDK error types, and streaming chunk aggregation.
+- Live Provider configuration is supplied only through environment variables. The preferred value
+  is `REPOPILOT_PROVIDER=langchain_openai`; `openai_compatible` remains a v1.4 compatibility alias.
+- Upstream streaming is aggregated before exposing one complete `ModelResponse` to role logic;
+  partial Planner/Reviewer structures and unvalidated Writer drafts never become task output.
 - Independent streaming and `stream_options.include_usage` compatibility switches.
 - Bounded retry/backoff, connect/read/write/pool timeouts, circuit breaker, and fallback provenance.
 - Content-free Provider lifecycle events for started, first byte, periodic progress, retry, timeout,
   failure, cancellation, and completion; TTFT and terminal latency metrics.
 - Missing Provider usage is conservatively estimated, explicitly marked, and used only for budget
-  accounting rather than represented as official billing data.
+  accounting rather than represented as official billing data; structured-output estimates include
+  the LangChain function Schema sent to the model.
 - Concurrent execution only for same-turn tools whose registered specs are all read-only.
 - Step/tool/Token budgets, duplicate-call detection, cancellation, and structured errors; tool and
   Token counters remain cumulative across Researcher revisions.
@@ -124,6 +137,9 @@ or provider-independent model quality.
   revision outcomes, fallback/degraded rate, latency, and refusal behavior.
 - Retrieval labels use exact repository paths (or an explicit directory prefix), and each case records
   its Top-5 returned sources so similarly named test/docs files cannot create hidden Recall positives.
+- CLI evaluation uses a fresh database and the dataset-declared `corpus_path`; application documents
+  cannot contaminate retrieval metrics, benchmark documents are not copied into the application
+  database, and only the final immutable evaluation-run record is retained for audit history.
 
 ## Non-goals
 
@@ -133,19 +149,19 @@ or provider-independent model quality.
 - Formal proof that every natural-language conclusion is correct.
 - Fabricated production traffic, DAU, throughput, revenue, accuracy, or cost claims.
 - Mandatory dependence on a model vendor, live API, vector database, Redis, or frontend framework
-  during tests. LangGraph is an intentional runtime dependency in v1.3, while deterministic tests
-  remain independent of an external model service.
+  during tests. LangChain model components and LangGraph are intentional runtime dependencies, while
+  deterministic tests remain independent of an external model service.
+- A nested `langchain.agents.create_agent` graph. RepoPilot's domain LangGraph is the single control
+  plane; a generic inner Agent graph would duplicate routing and termination ownership.
 - Direct token streaming of partial Planner/Reviewer JSON or unvalidated Writer drafts to users.
 - Exactly-once Provider execution, replay of in-flight HTTP requests, or lifecycle-event completion
   guarantees across process crashes.
 
 ## Release policy
 
-`v1.0.0`, `v1.1.0`, and `v1.2.0` remain frozen historical releases; their measured results and
-artifact hashes are never rewritten. `v1.3.0` adds buffered upstream SSE, Provider lifecycle
-telemetry, task-global budget enforcement, and Reviewer novelty/stagnation convergence without
-weakening the LangGraph/evidence/API contracts. A v1.3 freeze requires fresh code checks, the same
-deterministic 30-case regression, a real-provider no-fallback state-machine acceptance run,
-artifact/secret inspection, and container smoke tests. A real endpoint run demonstrates interface
-and workflow compatibility only unless it uses a labeled dataset and documented load methodology;
-it is not model-quality, throughput, capacity, or cost evidence.
+Historical release measurements and artifact hashes are immutable. A v1.5 release requires fresh
+code checks, branch coverage, the current 30-case deterministic regression, browser acceptance,
+reproducible wheel/sdist validation, clean-wheel installation, tracked-source and artifact secret
+inspection, and hardened Docker/Compose smoke. A real endpoint run demonstrates only interface and
+workflow compatibility unless it uses a labeled dataset and documented load methodology; it is not
+model-quality, throughput, capacity, or cost evidence.

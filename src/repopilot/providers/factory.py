@@ -6,7 +6,7 @@ from ..config import Settings
 from ..errors import ConfigurationError
 from .base import ModelProvider
 from .deterministic import DeterministicProvider
-from .openai_compatible import OpenAICompatibleProvider
+from .langchain_openai import LangChainOpenAIProvider
 from .resilient import CircuitBreaker, ResilientProvider, RetryPolicy
 
 
@@ -21,7 +21,7 @@ def build_provider(
     if not settings.llm_base_url or settings.llm_api_key is None or not settings.llm_model:
         raise ConfigurationError()
 
-    primary = OpenAICompatibleProvider(
+    primary = LangChainOpenAIProvider(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
         model=settings.llm_model,

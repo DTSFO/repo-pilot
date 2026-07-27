@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "repo-pilot"
-version = "1.4.0"
+version = "1.5.0"
 description = "LangGraph-orchestrated, evidence-first repository research agent with citations and recovery"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -14,17 +14,17 @@ dependencies = [
   "aiosqlite>=0.20,<1",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
+  "jsonschema>=4.23,<5",
+  "langchain-core>=1.5.1,<2",
+  "langchain-openai>=1.4,<2",
   "langgraph>=1.2,<2",
   "markdown-it-py>=3,<4",
   "nh3>=0.2,<1",
-  "orjson>=3.10,<4",
   "prometheus-client>=0.21,<1",
   "pydantic>=2.10,<3",
   "pydantic-settings>=2.7,<3",
   "python-multipart>=0.0.20,<1",
-  "redis>=5.2,<7",
   "sqlalchemy>=2.0,<3",
-  "tenacity>=9,<10",
   "uvicorn[standard]>=0.34,<1",
 ]
 
@@ -39,6 +39,7 @@ dev = [
   "pytest-asyncio>=0.25,<2",
   "pytest-cov>=6,<7",
   "ruff>=0.9,<1",
+  "types-jsonschema>=4.23,<5",
 ]
 
 [project.scripts]
@@ -81,8 +82,6 @@ select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "RUF"]
 extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header", "fastapi.File"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/repopilot/concurrency.py" = ["ASYNC109"]
-"src/repopilot/demo.py" = ["RUF001"]
 "src/repopilot/workflow.py" = ["RUF001"]
 
 [tool.mypy]

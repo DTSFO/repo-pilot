@@ -211,7 +211,7 @@ class ResilientProvider:
                     self.circuit_breaker.record_success()
                     return response
         except asyncio.CancelledError:
-            # Concrete providers such as OpenAICompatibleProvider emit their
+            # Concrete providers such as LangChainOpenAIProvider emit their
             # own cancelled event.  This cleanup is deliberately independent
             # of telemetry so a cancellation can never strand a half-open
             # permit.  Backoff cancellation above already emitted the wrapper

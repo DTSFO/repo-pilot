@@ -9,11 +9,26 @@ from sqlalchemy import inspect, text
 
 from repopilot.storage import Database
 from repopilot.storage.models import LEGACY_REPOSITORY_ID
+from repopilot.storage.repositories import RepositoryStore
 
 LEGACY_REVISION_ID = "00000000-0000-0000-0000-000000000002"
 
 
 class DatabaseMigrationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_fresh_database_does_not_publish_synthetic_ready_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fresh.db"
+            database = Database(f"sqlite+aiosqlite:///{path}")
+            try:
+                await database.initialize(legacy_root=directory)
+                store = RepositoryStore(database)
+                repository = await store.ensure_legacy(directory)
+
+                self.assertIsNone(await store.get_revision(LEGACY_REVISION_ID))
+                self.assertIsNone(await store.get_latest_ready_revision(repository.id))
+            finally:
+                await database.close()
+
     async def test_v13_sqlite_upgrade_is_scoped_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy.db"

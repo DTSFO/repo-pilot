@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import Any, Literal
 
 
@@ -37,57 +35,13 @@ class ModelResponse:
     finish_reason: str | None = None
     model: str | None = None
     usage: TokenUsage | None = None
+    usage_estimated: bool = False
     response_id: str | None = None
     fallback_used: bool = False
 
     def __post_init__(self) -> None:
         if self.text is None and not self.tool_calls:
             raise ValueError("ModelResponse needs text or at least one tool call")
-
-
-@dataclass(frozen=True)
-class OperationError:
-    """A safe error that may cross the service boundary."""
-
-    code: Literal["timeout", "operation_failed"]
-    message: str
-    exception_type: str
-
-
-@dataclass(frozen=True)
-class OperationResult:
-    """The structured outcome of one independent async operation."""
-
-    ok: bool
-    value: object | None = None
-    error: OperationError | None = None
-    duration_ms: float = 0.0
-
-    def __post_init__(self) -> None:
-        if self.ok == (self.error is not None):
-            raise ValueError("Successful results cannot have errors; failed results must have one")
-        if not self.ok and self.value is not None:
-            raise ValueError("Failed results cannot contain a value")
-        if self.duration_ms < 0:
-            raise ValueError("duration_ms cannot be negative")
-
-
-@dataclass(frozen=True)
-class ParallelOperationsResult:
-    """Named operation outcomes with batch-level summary counters."""
-
-    operations: Mapping[str, OperationResult]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "operations", MappingProxyType(dict(self.operations)))
-
-    @property
-    def success_count(self) -> int:
-        return sum(result.ok for result in self.operations.values())
-
-    @property
-    def failure_count(self) -> int:
-        return len(self.operations) - self.success_count
 
 
 @dataclass(frozen=True)

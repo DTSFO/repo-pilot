@@ -4,9 +4,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import func, select
 
 import repopilot.cli as cli
 from repopilot.config import Settings
+from repopilot.storage import Database, EvaluationRunRecord, SourceDocumentRecord
 
 
 def cli_settings(tmp_path: Path) -> Settings:
@@ -78,3 +80,47 @@ def test_write_report_creates_parent(tmp_path: Path) -> None:
     cli._write_report(output, '{"ok":true}')
 
     assert output.read_text(encoding="utf-8") == '{"ok":true}'
+
+
+async def test_eval_isolates_corpus_but_persists_run_record(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    benchmark = workspace / "benchmark"
+    benchmark.mkdir(parents=True)
+    (benchmark / "auth.py").write_text(
+        "def verify_token(token):\n    return token.startswith('Bearer ')\n",
+        encoding="utf-8",
+    )
+    (workspace / "historical.py").write_text(
+        "def unrelated_historical_document():\n    return 'must not enter benchmark'\n",
+        encoding="utf-8",
+    )
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(
+        '{"corpus_path":"benchmark","cases":['
+        '{"id":"auth","goal":"Bearer token verification",'
+        '"expected_source":"benchmark/auth.py"}]}'
+    )
+    output = tmp_path / "report.json"
+    settings = cli_settings(tmp_path).model_copy(update={"workspace_root": workspace})
+
+    result = await cli.run_eval(settings, dataset, output)
+
+    application_database = Database(settings.database_url)
+    await application_database.initialize()
+    try:
+        async with application_database.session() as session:
+            document_count = await session.scalar(
+                select(func.count()).select_from(SourceDocumentRecord)
+            )
+            records = list(await session.scalars(select(EvaluationRunRecord)))
+    finally:
+        await application_database.close()
+
+    assert output.exists()
+    assert result["corpus"]["documents"] == 1
+    assert result["run_config"]["corpus_path"] == "benchmark"
+    assert result["cases"][0]["top_sources"] == ("benchmark/auth.py",)
+    assert document_count == 0
+    assert len(records) == 1
+    assert records[0].id == result["run_id"]
+    assert records[0].configuration["corpus"]["documents"] == 1

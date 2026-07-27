@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+## 1.5.0 — 2026-07-27
+
+- 将标准模型集成迁移到 LangChain：`langchain-openai` 的 `ChatOpenAI` 负责 Messages、Tool
+  Calling、Pydantic structured output、流式 Chunk 聚合、usage 与 SDK 错误映射；删除重复维护
+  的原始 OpenAI/SSE 协议实现。
+- 保持 LangGraph 为唯一顶层控制平面，不嵌套 `langchain.agents.create_agent`；新增 ADR 记录
+  LangChain、LangGraph 与 RepoPilot Harness 的 Build-vs-Buy 边界和 Provider 兼容范围。
+- 生产 Researcher 直接复用受测试的 `ToolCallingHarness`，实际执行
+  model → tool → observation → model；增加单回合 Tool Call 上限并继续累计任务全局预算。
+- Planner、Reviewer 改为严格 Pydantic Schema；Evidence API/持久层补齐
+  `repository_id/revision_id` scope，防止证据链缺失不可变 revision 归属。
+- ToolRegistry 在注册时校验并预编译 Draft 2020-12 Schema，执行时真正强制字符串长度、
+  数值范围、类型与额外字段约束；不再只把 Schema 展示给模型。
+- 收紧 Provider 生命周期事件顺序：先提交 `started` 再启动 progress ticker，并覆盖慢异步
+  telemetry sink，避免极端取消/调度下 progress 先于 started 或遗留后台任务。
+- Provider 缺失官方 usage 时，fallback Token 估算会纳入 LangChain 为 Planner/Reviewer
+  结构化输出发送的函数 Schema，避免全局预算系统性低估。
+- 隔离离线评测与产品数据：CLI 每次在临时 SQLite 中只摄取数据集声明的 corpus，避免历史索引
+  污染 Recall/延迟或评测文档进入产品库；完成后仅复制不可变评测记录用于审计。
+- 修正 Compose 容器路径契约：应用工作区显式指向只读 `/workspace`，本地导入仅允许
+  `/workspace,/imports`，Git 仓库与数据库分别落到持久化 `/repositories`、`/app/data`；CI
+  校验生成后的 Compose 配置，避免挂载存在但应用仍误读镜像 `/app`。
+- 默认工作区从旧挂载路径迁移时更新 legacy repository 身份与路径、清空失效的活动索引指针，
+  但保留历史 revision、任务和证据；fallback 只选择当前 root 的 revision，且全新数据库不再
+  生成虚假的 legacy ready revision。重新索引后重复启动保持幂等。
+- 删除早期教学 Demo、并发/持久化兼容模块和示例工具；保留必要的 v1.4 Provider/Runtime
+  导入别名，清除未使用的直接运行时依赖。
+- 优化服务关闭顺序，先给短任务和 SQLite 终态提交宽限时间，再取消未完成任务，避免 ASGI
+  teardown 偶发争用超时。
 - 增加可持久化的按客户端每日研究任务配额；配置 `REPOPILOT_DAILY_TASK_LIMIT` 后，超额返回
   `429` 和 `Retry-After`，服务重启不会清零。
 

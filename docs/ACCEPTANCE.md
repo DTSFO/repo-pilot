@@ -1,6 +1,65 @@
 # RepoPilot 验收记录
 
-## v1.4.0 发布前验收状态
+## v1.5.0 发布候选验收状态
+
+日期：2026-07-27 · 范围：LangChain 模型集成边界、生产 Researcher Harness 复用、严格结构化
+输出、Evidence revision scope、依赖与教学遗留清理，以及完整重新发布/部署。
+
+本节只填写 v1.5 最终候选的实测结果。历史版本数字不迁移、不平均、也不冒充新版结果。
+
+| 检查 | v1.5 最终候选结果 |
+| --- | --- |
+| 单元/集成/API | 190 passed，1 个浏览器测试在默认套件中按设计 skipped；无意外跳过 |
+| 静态、类型与依赖 | `uv lock --check --offline`、frozen sync、`uv pip check`、Ruff、format、strict Mypy 全通过 |
+| 分支覆盖率 | 87.32%，超过 85% 门槛 |
+| deterministic 30-case 回归 | 独立临时数据库只摄取 `src/repopilot`；task success、Recall@5、citation precision/validity、refusal accuracy 均为 1.0；unsupported answer、degraded/fallback 均为 0；P95 373.233ms |
+| 浏览器产品流 | `REPOPILOT_RUN_BROWSER_TESTS=1`：1 passed；真实 Chromium 覆盖仓库添加、索引、任务、SSE、安全渲染、三种导出与移动视口 |
+| wheel/sdist 与 clean-wheel | 两次独立构建、独立 archive/metadata/secret 校验和逐字节比对通过；clean Python 3.12 环境安装、CLI、版本与 FastAPI app smoke 通过 |
+| Docker/Compose hardened smoke | Dockerfile check 无告警；真实容器非 root、只读 rootfs、drop ALL、no-new-privileges；应用正确读取只读 `/workspace`，数据/Git 使用持久卷；摄取→任务→Evidence 产品流通过 |
+| Git 与线上 Demo | 待提交、推送、ddhweb 同步和线上验证 |
+
+### v1.5 可追溯评测证据
+
+- `evals/dataset.json` SHA-256：`9d1522e97f22f29b05b4da6e57356ee59fa442dde7e29a991af1fbb334a29f9e`。
+- 当前 `evals/report.json` SHA-256：`9691f67918181c03dbe17c8e296f925b2470d4c2bd08422569df34a146fe1f96`。
+- 报告生成时间：`2026-07-27T13:58:57.516614Z`；隔离语料 33 documents，fingerprint
+  `f424f4ebcd43d4be4590b8bdc6bd4ce0efd4c50cc8032224107707b6d28c4cff`。
+- CLI 使用一次性 SQLite 执行摄取和评测，证明产品数据库不会接收 `SourceDocument`/Chunk；
+  完成后只把不可变 `EvaluationRunRecord` 复制到产品数据库，兼顾可复现性与审计历史。
+- run config 明确记录 `orchestrator=langgraph`、`max_steps=12`、全任务 Tool 预算 40、
+  单回合 Tool Call 上限 4、Token 预算 100000、Reviewer 返工上限 2。
+- 本轮没有逐主张蕴含标签、人工 Reviewer 决策标签或 revision-request case，因此对应指标
+  保持未评估；没有使用其他代理指标替代。
+
+### v1.5 本地交付证据
+
+- tracked + 待提交源码共 76 个现存文件通过高置信 secret pattern 扫描。
+- 两个独立空目录构建及最终 `release/` 校验逐字节一致：wheel `102801` bytes，SHA-256
+  `e140b34cc88311f8156da04c664ff656229e0f11625cf79b67bc6ff25bea2344`；sdist `299118`
+  bytes，SHA-256 `9dde05ffe72545f37f9395ba02ae7414eacc0330e424a5e993717dffdd49cf1e`。
+  两套外部 manifest/checksum、archive member、元数据和 secret 校验均通过，最终 wheel 在全新
+  Python 3.12 venv 中通过版本、CLI 与 FastAPI routes smoke。
+- 最终容器镜像 ID 为
+  `sha256:c8bbc83245b87ceabcab61e68c318771ce349c3dfe6d03cee7ab7d69c1ac6a1e`；最终镜像按
+  Compose 加固配置先验证全新数据库不暴露虚假 ready revision，再实际摄取 69 个
+  `/workspace` 文档、生成 352 个 chunks，完成 `degraded=false` 任务并保存 5 条带
+  repository/revision scope 的 Evidence。
+
+### v1.5 架构验收口径
+
+- LangChain 适合 RepoPilot，实际用于模型集成层；不使用 `create_agent` 是为了保持已有领域
+  LangGraph 为唯一控制平面，而不是为了回避框架。
+- Planner/Reviewer 使用 Pydantic structured output；Researcher 使用 LangChain Tool Calling，
+  但工具执行、权限、预算和 observation 生命周期由 RepoPilot `ToolCallingHarness` 强制。
+- 四个节点共同构成一个有界多角色仓库研究 Agent。它不是四个独立自治 Agent，也不冒充
+  通用 Multi-Agent 平台。
+- 当前产品范围是单用户、自托管、只读、多仓库研究。未测量的多租户、多副本、互联网规模
+  吞吐和真实模型质量不属于 v1.5 声明。
+- Compose 路径已实测：默认 legacy repository 指向 `/workspace`，本地 onboarding 只允许
+  `/workspace,/imports`，而非误读镜像 `/app`；本轮容器摄取 69 个挂载文档，任务
+  `completed`、`degraded=false` 并保存 5 条带 repository/revision scope 的 Evidence。
+
+## v1.4.0 历史验收状态
 
 日期：2026-07-22 · 范围：持久化多仓库/revision、数据库迁移、渲染报告、导出、浏览器产品流和
 容器交付。v1.3.0 及更早版本的冻结数字、哈希和语义保持不变。

@@ -1,4 +1,4 @@
-# RepoPilot v1.4 Architecture
+# RepoPilot v1.5 Architecture
 
 ## Repository and report boundary
 
@@ -11,6 +11,11 @@ retain the last ready revision; archiving is soft and preserves historical repor
 Document, chunk, retrieval, evidence, checkpoint and repository-memory queries carry the same
 `(repository_id, revision_id)` boundary. Existing v1.3 SQLite databases are upgraded in place,
 including a rebuild of the old global document uniqueness constraint, and the migration is idempotent.
+If a deployment changes the default workspace mount (for example `/app` to `/workspace`), startup
+updates the fixed legacy repository path and invalidates only its stale active-index pointer. Old
+revisions, tasks and evidence remain queryable; a new sync promotes the replacement revision, and
+subsequent startups preserve it. Revision fallback is restricted to the repository's current root,
+and a fresh database does not publish a synthetic `ready` revision before the first scan.
 
 Reports have three representations: original Markdown for auditability, sanitized HTML for the UI and
 standalone export, and a versioned JSON envelope containing metadata/evidence. Rendering is local and
@@ -26,13 +31,14 @@ Web UI (static, served at /)          MCP client (stdio)
 FastAPI application  ◄──────────────  repopilot mcp
   ├── TaskService        events · WorkflowState checkpoints · resume · cancel
   ├── LangGraph          compiled StateGraph · conditional revision edge · typed workflow state
+  ├── LangChain          Messages · ChatOpenAI · Tool Calling · Pydantic structured output
   ├── Role harnesses     model-driven tool loops · schema contracts · evidence-scoped prompts
   ├── ToolRegistry       schema-validated allowlist · read-only execution · observations
-  ├── AsyncAgentRuntime  task-global budgets · retries · concurrency · fallback provenance
+  ├── ToolCallingHarness bounded Researcher model → tool → observation loop
   ├── HybridRetriever    BM25 × weak deterministic hashed-embedding bonus
   ├── MemoryStore        task summaries · bounded recall · expiry
   ├── RepositoryIngestor safe walk · versioned documents · line-window chunks
-  ├── Providers          Resilient → buffered upstream SSE / deterministic fallback
+  ├── Providers          Resilient → LangChain ChatOpenAI / deterministic fallback
   ├── Observability      lifecycle timeline · TTFT/latency · JSON redaction · Prometheus
   └── Storage            SQLite/SQLAlchemy async (PostgreSQL-ready URL switch)
 ```
@@ -90,11 +96,12 @@ would enlarge the graph without strengthening safety.
 
 ### Planner
 
-In live-provider mode the Planner requests a JSON plan containing retrieval queries,
-subquestions, and completion criteria. RepoPilot parses, deduplicates, length-limits, and
-count-limits that output locally. Malformed JSON, Provider failure, or Provider fallback selects a
-deterministic lexical plan and marks the run degraded; it does not hand an invalid plan to later
-nodes. Deterministic mode directly creates the local plan and follows the same state transitions.
+In live-provider mode the Planner uses LangChain
+`with_structured_output(PlannerOutput, method="function_calling")` to request a Pydantic-validated
+plan containing retrieval queries, subquestions, and completion criteria. RepoPilot still
+deduplicates, length-limits, count-limits, and applies business fallback locally. Schema success is
+not treated as proof that the plan is useful or authorized. Provider failure or fallback selects a
+deterministic lexical plan and marks the run degraded; deterministic mode follows the same graph.
 
 ### Researcher
 
@@ -103,7 +110,9 @@ explicit registry of read-only, idempotent operations such as repository search 
 Every argument is checked against JSON Schema, every result becomes an observation, and repository
 content is treated as untrusted data that cannot change system rules or tool permissions.
 
-The model may choose which registered tool to call within its budget. Unknown tools, invalid
+LangChain `bind_tools` exposes the registry schema to the model; the RepoPilot Harness, not
+LangChain, executes each requested call. The model may choose which registered tool to call within
+its budget. Unknown tools, invalid
 arguments, timeouts, repeat fingerprints, and partial failures are recorded and mark the run
 degraded without discarding already collected valid evidence. Same-turn concurrency is allowed
 only when every selected tool is read-only.
@@ -118,8 +127,8 @@ Review is deliberately split into two layers:
 
 1. A deterministic hard gate verifies the latest stored chunk still exists, removes duplicates,
    applies score/coverage thresholds, and requires a resolvable source citation.
-2. In live-provider mode an LLM reviews relevance and entailment among hard-gate candidates and may
-   request bounded additional queries.
+2. In live-provider mode LangChain structured output obtains a typed semantic decision among
+   hard-gate candidates and may request bounded additional queries.
 
 The semantic reviewer receives the completion requirements, already executed queries, and current
 candidates. It can only remove evidence from the hard-gate set; it cannot promote a stale,
@@ -170,16 +179,34 @@ does not attach a second LangGraph checkpoint saver. Two persistence authorities
 dual-write ordering, reconciliation, and ambiguous-resume problems; keeping one store also lets the
 REST API, SSE, MCP, evaluation, cancel, and resume paths observe the same committed state.
 
+## LangChain, LangGraph, and Harness boundary
+
+RepoPilot intentionally has one control plane:
+
+- `langchain-core` owns message and Runnable contracts;
+- `langchain-openai` owns `ChatOpenAI`, standard OpenAI Chat/Tool Calling translation, Pydantic
+  structured output, and streaming chunk aggregation;
+- LangGraph owns the top-level Planner → Researcher ⇄ Reviewer → Writer state machine;
+- RepoPilot owns repository/revision isolation, retrieval, tool execution, evidence hard gates,
+  citations, task-global budgets, recovery, durable events, and security policy.
+
+The project does not use `langchain.agents.create_agent`. That API is a good fit for one general
+model/tool loop, but it would create another Agent graph inside an application that already has a
+domain-specific LangGraph. Doing so would duplicate termination ownership and obscure that only
+Researcher has tools, Reviewer cannot promote hard-rejected evidence, and Writer cannot retrieve.
+This is a Build-vs-Buy boundary, not a rejection of LangChain. See
+`docs/adr/0001-langchain-langgraph-boundary.md`.
+
 ## Provider and task streaming semantics
 
 There are two separate streaming layers:
 
-1. The OpenAI-compatible adapter sends `stream=true` upstream by default. It consumes SSE chunks,
-   merges text and fragmented tool calls, captures finish reason/model/usage, validates the complete
-   structure, and only then returns one `ModelResponse` to Planner, Researcher, Reviewer, or Writer.
-   Unvalidated JSON fragments and Writer drafts are never exposed as the task answer. A Provider
-   that returns ordinary JSON despite `stream=true` is also accepted. Streaming and
-   `stream_options.include_usage` can be disabled independently for compatibility.
+1. `LangChainOpenAIProvider` uses `ChatOpenAI` and streams ordinary text/tool responses by default.
+   LangChain aggregates text and fragmented tool-call chunks; RepoPilot converts the completed
+   `AIMessage` into its provider-neutral `ModelResponse`, maps usage/finish metadata, and validates
+   local contracts before a role can consume it. Planner and Reviewer structured output is invoked
+   as a complete typed response rather than exposing partial JSON. Streaming and usage inclusion can
+   be disabled independently for endpoint compatibility.
 2. The FastAPI task endpoint streams durable task events to the browser. It is not a token proxy for
    the upstream model response.
 
@@ -206,6 +233,12 @@ push-based pub/sub, cross-replica fan-out, or exactly-once delivery.
 - **Why LangGraph?** Named durable nodes and a conditional review loop are now product concepts,
   not incidental control flow. The dependency earns its place through inspectability and extension
   points, while repository/provider/storage interfaces remain framework-independent.
+- **Why LangChain?** Standard message conversion, Tool Calling, streaming chunk aggregation, SDK
+  error handling, and structured output are commodity integration concerns. Reusing maintained
+  Provider components removes protocol code that did not differentiate the product.
+- **Why not `create_agent`?** RepoPilot already has a domain graph with four authority boundaries and
+  evidence-specific routing. Nesting a generic Agent graph would add a second control plane rather
+  than simplify the product.
 - **Why four roles?** They separate prompt context and authority: only Researcher gets repository
   tools, Reviewer cannot promote hard-rejected evidence, and Writer cannot retrieve new facts.
 - **Why deterministic gates around an LLM?** Source freshness, citation resolution, permissions,
@@ -220,6 +253,11 @@ push-based pub/sub, cross-replica fan-out, or exactly-once delivery.
   event streaming.
 - **Why deterministic baseline?** It isolates workflow/retrieval regressions from model drift. Live
   Provider experiments answer a different question and must record endpoint, model and config.
+- **Why an isolated evaluation database?** Retrieval metrics must depend only on the declared
+  dataset corpus. The CLI creates a fresh temporary SQLite database, ingests only `corpus_path`,
+  writes the report, and copies only the immutable evaluation-run record into the application
+  database. Product history therefore cannot improve or degrade the benchmark, and benchmark
+  documents cannot enter the product index.
 - **What is not exactly-once?** In-flight Provider calls. Checkpoints describe committed state at
   node boundaries; they do not serialize remote execution or guarantee byte-identical replay.
 - **Why does Writer refuse on a last-moment corpus drift instead of looping back?** Recovery preflight
@@ -230,17 +268,20 @@ push-based pub/sub, cross-replica fan-out, or exactly-once delivery.
 
 ## Provider, usage, guarded, and degraded semantics
 
-The OpenAI-compatible adapter is optional and receives base URL, model, and key only from settings.
-It has separate connect/read/write/pool timeouts. The resilient wrapper applies bounded retry and
-circuit breaking before using the deterministic fallback. Retries share one logical `call_id` with
-increasing attempts; fallback emits its own terminal lifecycle event. A fallback response carries
-explicit provenance (`fallback_used`) through model response, runtime trace, workflow state, and
-final task status; fallback never masquerades as a successful live-model answer.
+The LangChain OpenAI integration is optional and receives base URL, model, and key only from
+settings. It targets the standard OpenAI Chat/Tool Calling protocol; non-standard fields require the
+corresponding Provider-specific LangChain package before support is advertised. Separate
+connect/read/write/pool timeouts are preserved. The resilient wrapper applies bounded retry and
+circuit breaking before deterministic fallback. Retries share one logical `call_id` with increasing
+attempts; fallback carries explicit provenance (`fallback_used`) through response, trace, workflow,
+and task status.
 
 When the Provider supplies streaming usage, RepoPilot uses it. Compatible endpoints that omit usage
 receive a conservative character-based estimate so the task-global Token budget is not silently
-recorded as zero. Lifecycle metadata marks `usage_reported` versus `usage_estimated`; an estimate is
-budget accounting, not official billing data.
+recorded as zero. Planner/Reviewer estimates include the function-tool Schema that LangChain sends
+for structured output, rather than counting only visible messages. Lifecycle metadata marks
+`usage_reported` versus `usage_estimated`; an estimate is budget accounting, not official billing
+data.
 
 Durable Provider metadata is flattened through an explicit allowlist. It may include call/attempt,
 configured and served model, purpose, elapsed time, progress counters, safe error codes, timeout
@@ -289,7 +330,7 @@ src/repopilot/
   retrieval.py       tokenization, BM25, hashed bonus, HybridRetriever
   evaluation.py      fixed-dataset runner and release metrics
   mcp.py             separate read-only MCP stdio surface
-  providers/         base, deterministic, openai_compatible, resilient, factory
+  providers/         base, deterministic, langchain_openai, resilient, compatibility alias, factory
   storage/           tasks, documents, checkpoints, evidence, memory, eval runs
 ```
 
