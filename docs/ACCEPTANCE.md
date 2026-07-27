@@ -1,6 +1,6 @@
 # RepoPilot 验收记录
 
-## v1.5.0 发布候选验收状态
+## v1.5.0 最终验收状态
 
 日期：2026-07-27 · 范围：LangChain 模型集成边界、生产 Researcher Harness 复用、严格结构化
 输出、Evidence revision scope、依赖与教学遗留清理，以及完整重新发布/部署。
@@ -16,7 +16,7 @@
 | 浏览器产品流 | `REPOPILOT_RUN_BROWSER_TESTS=1`：1 passed；真实 Chromium 覆盖仓库添加、索引、任务、SSE、安全渲染、三种导出与移动视口 |
 | wheel/sdist 与 clean-wheel | 两次独立构建、独立 archive/metadata/secret 校验和逐字节比对通过；clean Python 3.12 环境安装、CLI、版本与 FastAPI app smoke 通过 |
 | Docker/Compose hardened smoke | Dockerfile check 无告警；真实容器非 root、只读 rootfs、drop ALL、no-new-privileges；应用正确读取只读 `/workspace`，数据/Git 使用持久卷；摄取→任务→Evidence 产品流通过 |
-| Git 与线上 Demo | 待提交、推送、ddhweb 同步和线上验证 |
+| Git 与线上 Demo | 生产实现提交 `1c68ce90775d1665996ab65c81ccb51501f4bd39` 已推送并由 ddhweb 确认式 SSH 快进部署；服务 active/healthy、HTTP 200，最终文档闭环 revision 继续使用同一 ff-only 流程同步 |
 
 ### v1.5 可追溯评测证据
 
@@ -35,8 +35,8 @@
 
 - tracked + 待提交源码共 76 个现存文件通过高置信 secret pattern 扫描。
 - 两个独立空目录构建及校验逐字节一致：wheel `104772` bytes，SHA-256
-  `73bc24eb14ee9c44bb93371862af89e4a0bc2914020c844146713c76692bfe3a`；sdist `303062`
-  bytes，SHA-256 `e3e58fc6ba1bdb66aeebfede9f16fdf1d153d20cdea4e8287afd780e631b31e2`。
+  `73bc24eb14ee9c44bb93371862af89e4a0bc2914020c844146713c76692bfe3a`；sdist `303108`
+  bytes，SHA-256 `0be7a918fe6f9c92c03679551547d427b4a262a1bd8c19625adc73160539806c`。
   两套外部 manifest/checksum、archive member、元数据和 secret 校验均通过，最终 wheel 在全新
   Python 3.12 venv 中通过版本、CLI 与 FastAPI routes smoke。
 - 最终本地容器镜像 ID 为
@@ -47,6 +47,27 @@
   `/workspace` 文档、生成 357 个 chunks，公开创建任务后以 `completed`、`degraded=false`
   结束，并保存 6 条 repository/revision scope 全匹配的 Evidence。非 root、只读 rootfs、
   drop ALL、no-new-privileges 与可写数据卷边界同时通过。
+
+### v1.5 线上部署证据
+
+- `main` 的生产实现提交 `1c68ce90775d1665996ab65c81ccb51501f4bd39` 通过 ddhweb CLI
+  3.0.0 定位到 `vps1:/opt/repo-pilot`。远端部署前工作树干净、分支为 `main`、origin 精确
+  指向公开 GitHub 仓库；更新使用 `git merge --ff-only`，随后 Compose 原地重建。最终文档
+  闭环 revision 不改变运行时代码，并按相同断言继续同步到远端干净工作树。
+- ddhweb 的服务状态为 `active`，健康检查为 `healthy`，公网首页 HTTP 200；远端容器健康状态
+  为 `healthy`，运行镜像 ID 为
+  `sha256:c435bbe177a8e1edcb1abaddc13a53aa7d048a04ac4b564294b6208bf5f740fc`。
+- 公网运行模式明确为 `deterministic` + Public Demo，每客户端每日 5 次，管理控制面未配置
+  Token 时保持 `disabled`/`403`。这是一种稳定托管模式，不把当前不可用的外部模型 channel
+  或 deterministic 结果包装成真实 Provider 成功。
+- 注册的 Git 仓库在生产实现验收时已同步到 `1c68ce90775d1665996ab65c81ccb51501f4bd39`。
+  线上任务 `b04f90b4-6bae-404e-915f-9bd054c1ab12` 以 `completed`、`degraded=false` 结束，
+  保存 14 条 Evidence；全部 `repository_id/revision_id` 与任务冻结 scope 一致。12 条事件中
+  Provider failure、timeout、retry 和 fallback 均为 0。
+- 公网 Chromium 从空白页开始监听后再导航：桌面 `1440×1000`、移动 `390×844` 均无横向
+  溢出、console error、pageerror 或失败请求。两个视口都实际加载
+  `static.cloudflareinsights.com/beacon.min.js` 并成功请求同源 `/cdn-cgi/rum`，证明精确 CSP
+  白名单解决了 Cloudflare 自动注入冲突，而没有使用第三方通配域名。
 
 ### v1.5 架构验收口径
 
@@ -60,6 +81,9 @@
   吞吐和真实模型质量不属于 v1.5 声明。
 - 公网 Demo 使用独立管理面策略：限额任务创建与 UUID 结果读取可公开；任务枚举、仓库变更、
   摄取/上传、Memory 与 metrics 在无管理员 Token 时 fail-closed 为 `403`，配置 Token 后才开放。
+- Cloudflare Browser Insights 兼容是部署专用、默认关闭的 CSP 扩展；只允许固定脚本 origin
+  与固定上报 origin。公网实际 beacon 走同源 `/cdn-cgi/rum`，仍被原有 `connect-src 'self'`
+  覆盖；保留固定上报 origin 是为了兼容 Cloudflare 的另一种报告端点，而不是放宽到通配域名。
 - Compose 路径已实测：默认 legacy repository 指向 `/workspace`，本地 onboarding 只允许
   `/workspace,/imports`，而非误读镜像 `/app`；本轮容器摄取 70 个挂载文档、357 个 chunks，
   任务 `completed`、`degraded=false` 并保存 6 条带 repository/revision scope 的 Evidence。

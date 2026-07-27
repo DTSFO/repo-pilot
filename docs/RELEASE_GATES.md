@@ -68,8 +68,10 @@ the final candidate.
   without deleting history: the stale active revision pointer is invalidated, paths are updated,
   fallback cannot select an old-root revision, fresh databases expose no synthetic ready revision,
   and later startups preserve the newly indexed revision.
-- [ ] Source diff is reviewed, committed, and pushed to `main`; the ddhweb `repo-pilot` service is
-  synchronized from that revision and its online health, API/UI, and deployed revision are verified.
+- [x] Source diff is reviewed, committed, and pushed to `main`; the production implementation and
+  final documentation closure revision are synchronized through ddhweb confirmed SSH with clean
+  worktree, branch/origin, ff-only and target-revision assertions. Online health, API/UI, indexed
+  repository revision, task evidence scope, and desktop/mobile Browser Insights behavior pass.
 
 ---
 
