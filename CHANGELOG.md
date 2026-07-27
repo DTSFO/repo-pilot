@@ -33,6 +33,10 @@
   teardown 偶发争用超时。
 - 增加可持久化的按客户端每日研究任务配额；配置 `REPOPILOT_DAILY_TASK_LIMIT` 后，超额返回
   `429` 和 `Retry-After`，服务重启不会清零。
+- 增加公网 Demo 的控制面隔离：限额研究任务与 UUID 结果读取可公开，但任务历史枚举、仓库
+  变更、摄取/上传、Memory 和 metrics 必须使用独立管理员 Token；未配置管理员 Token 时
+  fail-closed 返回 `403`。UI 只在当前页面内存维护公开任务引用，并显示 deterministic/live
+  运行模式，避免把外部 Provider 故障或离线演示伪装成同一口径。
 
 ## 1.4.0 — 2026-07-22
 

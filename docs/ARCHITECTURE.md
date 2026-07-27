@@ -258,6 +258,11 @@ push-based pub/sub, cross-replica fan-out, or exactly-once delivery.
   writes the report, and copies only the immutable evaluation-run record into the application
   database. Product history therefore cannot improve or degrade the benchmark, and benchmark
   documents cannot enter the product index.
+- **Why split the public Demo from its management plane?** A task quota does not protect repository
+  mutation, ingestion, shared task enumeration, memory, or metrics. In public-Demo mode those
+  operations require a separate administrator Bearer Token; if none is configured, they fail closed
+  with `403`. Public visitors can still create bounded tasks and retrieve a task by its unguessable
+  UUID, while the browser keeps only page-session task references and never persists a Token.
 - **What is not exactly-once?** In-flight Provider calls. Checkpoints describe committed state at
   node boundaries; they do not serialize remote execution or guarantee byte-identical replay.
 - **Why does Writer refuse on a last-moment corpus drift instead of looping back?** Recovery preflight

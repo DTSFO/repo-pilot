@@ -4,6 +4,11 @@ let currentTask = null;
 let currentRepository = null;
 let streamController = null;
 let apiToken = null;
+let runtimeInfo = {
+  provider_mode: 'deterministic', public_demo: false, api_token_required: false,
+  admin_access: 'open', task_history_access: 'open', daily_task_limit: 0,
+};
+const sessionTasks = new Map();
 
 function requestApiToken() {
   const supplied = window.prompt('RepoPilot API Token（仅保存在当前页面内存）');
@@ -41,6 +46,43 @@ function setStatus(node, status) {
   node.textContent = String(status);
 }
 
+function rememberTask(task) {
+  if (!task?.id) return;
+  sessionTasks.set(String(task.id), {...(sessionTasks.get(String(task.id)) || {}), ...task});
+}
+
+function renderTaskList(tasks) {
+  const fragment = document.createDocumentFragment();
+  for (const task of tasks) {
+    const li = document.createElement('li'); li.dataset.id = String(task.id);
+    if (task.id === currentTask) li.classList.add('active');
+    const goal = document.createElement('div'); goal.className = 'goal'; goal.textContent = String(task.goal);
+    const status = document.createElement('span'); setStatus(status, task.status);
+    if (task.degraded) status.textContent += ' · degraded';
+    li.append(goal, status); li.onclick = () => selectTask(li.dataset.id); fragment.append(li);
+  }
+  $('tasks').replaceChildren(fragment);
+}
+
+function renderSessionTasks() {
+  const tasks = Array.from(sessionTasks.values())
+    .filter((task) => !currentRepository || task.repository_id === currentRepository)
+    .reverse();
+  renderTaskList(tasks);
+  $('task-list-info').textContent = '公开模式仅显示当前页面创建或打开的任务；刷新后不会枚举他人历史。';
+}
+
+async function refreshRuntime() {
+  runtimeInfo = await api('/api/runtime');
+  const labels = [runtimeInfo.provider_mode === 'live' ? 'Live Provider' : 'Deterministic'];
+  if (runtimeInfo.public_demo) labels.push('公开 Demo');
+  if (runtimeInfo.daily_task_limit) labels.push(`每客户端 ${runtimeInfo.daily_task_limit} 次/日`);
+  $('runtime-mode').textContent = `· ${labels.join(' · ')}`;
+  const adminDisabled = runtimeInfo.admin_access === 'disabled';
+  $('admin-actions').hidden = adminDisabled;
+  if (adminDisabled) $('ingest-info').textContent = '公开 Demo 已关闭仓库、摄取和其他管理写操作。';
+}
+
 async function refreshRepositories() {
   const repositories = await api('/api/repositories');
   if (!currentRepository && repositories.length) currentRepository = repositories[0].id;
@@ -61,7 +103,7 @@ async function refreshRepositories() {
       await refreshRepositories(); await refreshTasks();
     };
     actions.append(select);
-    if (repo.id !== '00000000-0000-0000-0000-000000000001') {
+    if (runtimeInfo.admin_access !== 'disabled' && repo.id !== '00000000-0000-0000-0000-000000000001') {
       const archive = document.createElement('button'); archive.type = 'button'; archive.className = 'secondary';
       archive.textContent = '归档';
       archive.onclick = async (event) => {
@@ -86,18 +128,20 @@ async function refreshRepositories() {
 }
 
 async function refreshTasks() {
-  const suffix = currentRepository ? `?repository_id=${encodeURIComponent(currentRepository)}` : '';
-  const tasks = await api(`/api/tasks${suffix}`);
-  const fragment = document.createDocumentFragment();
-  for (const task of tasks) {
-    const li = document.createElement('li'); li.dataset.id = String(task.id);
-    if (task.id === currentTask) li.classList.add('active');
-    const goal = document.createElement('div'); goal.className = 'goal'; goal.textContent = String(task.goal);
-    const status = document.createElement('span'); setStatus(status, task.status);
-    if (task.degraded) status.textContent += ' · degraded';
-    li.append(goal, status); li.onclick = () => selectTask(li.dataset.id); fragment.append(li);
+  if (runtimeInfo.task_history_access === 'session_only' ||
+      (runtimeInfo.task_history_access === 'admin_token' && !apiToken)) {
+    renderSessionTasks(); return;
   }
-  $('tasks').replaceChildren(fragment);
+  const suffix = currentRepository ? `?repository_id=${encodeURIComponent(currentRepository)}` : '';
+  const response = await request(`/api/tasks${suffix}`);
+  if (response.status === 403 && runtimeInfo.public_demo) {
+    runtimeInfo.task_history_access = 'session_only'; renderSessionTasks(); return;
+  }
+  if (!response.ok) throw new Error(await responseError(response));
+  const tasks = await response.json();
+  for (const task of tasks) rememberTask(task);
+  $('task-list-info').textContent = '';
+  renderTaskList(tasks);
 }
 
 function renderEvidence(evidence) {
@@ -133,6 +177,7 @@ async function renderTaskReport(task) {
 async function selectTask(id) {
   currentTask = id; await refreshTasks();
   const task = await api(`/api/tasks/${id}`);
+  rememberTask(task);
   $('task-meta').textContent = `${task.status} · v${task.version}`;
   await renderTaskReport(task);
   renderEvidence(await api(`/api/tasks/${id}/evidence`));
@@ -203,7 +248,7 @@ async function streamTask(id, controller) {
 }
 
 async function selectTaskSilently(id) {
-  const task = await api(`/api/tasks/${id}`); $('task-meta').textContent = `${task.status} · v${task.version}`;
+  const task = await api(`/api/tasks/${id}`); rememberTask(task); $('task-meta').textContent = `${task.status} · v${task.version}`;
   if (task.final_report) await renderTaskReport(task);
   renderEvidence(await api(`/api/tasks/${id}/evidence`)); await refreshTasks();
 }
@@ -219,7 +264,7 @@ async function downloadReport(format) {
 $('create').onclick = async () => {
   const goal = $('goal').value.trim(); if (!goal || !currentRepository) return;
   const task = await api('/api/tasks', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({goal, repository_id:currentRepository})});
-  $('goal').value = ''; await selectTask(task.id);
+  rememberTask(task); $('goal').value = ''; await selectTask(task.id);
 };
 
 $('ingest').onclick = async () => {
@@ -241,4 +286,9 @@ $('repository-form').onsubmit = async (event) => {
   } catch (error) { $('repository-error').textContent = error.message; }
 };
 
-void Promise.all([refreshRepositories(), refreshTasks()]).catch((error) => appendEventLabel(`API error: ${error.message}`));
+async function initialize() {
+  await refreshRuntime();
+  await Promise.all([refreshRepositories(), refreshTasks()]);
+}
+
+void initialize().catch((error) => appendEventLabel(`API error: ${error.message}`));

@@ -115,6 +115,9 @@ or provider-independent model quality.
 - Durable tasks, events, checkpoints, documents, chunks, evidence, memories, and evaluation runs.
 - REST API, configurable SQLite short-polling SSE replay with `Last-Event-ID`, unnumbered transport
   heartbeat, health/readiness endpoints, and Prometheus metrics.
+- Public-Demo control-plane separation: quota-limited task creation and UUID-addressed task results
+  can remain public, while task enumeration, repository mutation, ingestion/upload, memory, and
+  metrics require a separate administrator token or fail closed when no administrator token exists.
 - Same-task event sequence serialization is guaranteed inside one RepoPilot process with bounded
   uniqueness retry; multi-process/multi-replica fan-out is outside the product contract.
 

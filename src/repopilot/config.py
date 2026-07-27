@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     allowed_repository_roots: str = ""
     repository_sync_timeout_seconds: float = Field(default=120.0, gt=0, le=1800)
     api_token: SecretStr | None = None
+    admin_api_token: SecretStr | None = None
+    public_demo_mode: bool = False
     daily_task_limit: int = Field(default=0, ge=0, le=1000)
     daily_quota_timezone: str = "UTC"
     max_steps: int = Field(default=12, ge=1, le=100)
@@ -61,7 +63,7 @@ class Settings(BaseSettings):
     sse_heartbeat_seconds: float = Field(default=15.0, ge=0.01, le=300)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
-    @field_validator("llm_api_key", "api_token", mode="before")
+    @field_validator("llm_api_key", "api_token", "admin_api_token", mode="before")
     @classmethod
     def blank_optional_secret_is_none(cls, value: object) -> object:
         if isinstance(value, SecretStr):
@@ -78,6 +80,10 @@ class Settings(BaseSettings):
             raise ValueError("langchain_openai requires LLM_BASE_URL, LLM_MODEL, and LLM_API_KEY")
         if self.llm_retry_max_seconds < self.llm_retry_base_seconds:
             raise ValueError("LLM_RETRY_MAX_SECONDS must be >= LLM_RETRY_BASE_SECONDS")
+        if self.public_demo_mode and self.api_token is None and self.daily_task_limit == 0:
+            raise ValueError(
+                "PUBLIC_DEMO_MODE requires DAILY_TASK_LIMIT > 0 when API_TOKEN is unset"
+            )
         try:
             ZoneInfo(self.daily_quota_timezone)
         except ZoneInfoNotFoundError as exc:

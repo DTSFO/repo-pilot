@@ -45,6 +45,9 @@ the final candidate.
 - [x] Documentation states that BM25 plus a weak deterministic hash bonus is not a learned embedding
   or reranker, SQLite polling SSE is not a cross-replica event bus, and checkpointing is not
   exactly-once Provider execution.
+- [x] Public-Demo management endpoints fail closed without an administrator token; quota-limited
+  task creation, UUID-addressed task reads, runtime-mode disclosure, and page-session task history
+  behavior are covered by API/UI tests without persisting bearer credentials.
 
 ## v1.5 delivery and deployment
 

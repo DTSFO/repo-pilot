@@ -228,6 +228,65 @@ async def test_api_token_is_enforced(tmp_path: Path) -> None:
             assert allowed.status_code == 202
 
 
+async def test_public_demo_disables_management_plane_and_task_enumeration(
+    tmp_path: Path,
+) -> None:
+    app = create_app(make_settings(tmp_path, public_demo_mode=True, daily_task_limit=5))
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            runtime = (await http.get("/api/runtime")).json()
+            assert runtime == {
+                "provider_mode": "deterministic",
+                "public_demo": True,
+                "api_token_required": False,
+                "admin_access": "disabled",
+                "task_history_access": "session_only",
+                "daily_task_limit": 5,
+            }
+            assert (await http.get("/api/repositories")).status_code == 200
+
+            created = await http.post("/api/tasks", json={"goal": "public bounded task"})
+            assert created.status_code == 202
+            task_id = created.json()["id"]
+            assert (await http.get(f"/api/tasks/{task_id}")).status_code == 200
+
+            for method, path, kwargs in (
+                ("GET", "/api/tasks", {}),
+                ("POST", "/api/ingest", {"json": {}}),
+                ("POST", "/api/repositories", {"json": {"local_path": str(tmp_path)}}),
+                ("GET", "/api/memory", {}),
+                ("GET", "/metrics", {}),
+            ):
+                blocked = await http.request(method, path, **kwargs)
+                assert blocked.status_code == 403
+                assert blocked.json()["error"]["code"] == "admin_operations_disabled"
+
+
+async def test_public_demo_admin_token_unlocks_control_plane(tmp_path: Path) -> None:
+    app = create_app(
+        make_settings(
+            tmp_path,
+            public_demo_mode=True,
+            daily_task_limit=5,
+            admin_api_token="admin-secret",
+        )
+    )
+    authorization = {"Authorization": "Bearer admin-secret"}
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            runtime = (await http.get("/api/runtime")).json()
+            assert runtime["admin_access"] == "token_required"
+            assert runtime["task_history_access"] == "admin_token"
+            assert (await http.post("/api/tasks", json={"goal": "still public"})).status_code == 202
+
+            denied = await http.get("/api/tasks")
+            assert denied.status_code == 401
+            assert (await http.get("/api/tasks", headers=authorization)).status_code == 200
+            assert (await http.get("/metrics", headers=authorization)).status_code == 200
+
+
 async def test_bearer_header_authorizes_fetch_based_task_stream(tmp_path: Path) -> None:
     app = create_app(make_settings(tmp_path, api_token="secret-token"))
     authorization = {"Authorization": "Bearer secret-token"}

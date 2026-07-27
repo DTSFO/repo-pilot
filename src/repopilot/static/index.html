@@ -8,14 +8,14 @@
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<header><h1>RepoPilot</h1><span>证据优先的仓库研究 Agent</span></header>
+<header><h1>RepoPilot</h1><span>证据优先的仓库研究 Agent</span><span id="runtime-mode"></span></header>
 <main>
   <section>
     <div class="panel">
       <h2>仓库</h2>
       <p class="muted" id="repository-meta">未选择仓库</p>
       <ul id="repositories"></ul>
-      <div class="row"><button id="add-repository">添加仓库</button><button id="ingest" class="secondary">重新索引</button></div>
+      <div class="row" id="admin-actions"><button id="add-repository">添加仓库</button><button id="ingest" class="secondary">重新索引</button></div>
       <p class="muted" id="ingest-info"></p>
     </div>
     <div class="panel spaced">
@@ -25,6 +25,7 @@
     </div>
     <div class="panel spaced">
       <h2>任务列表</h2>
+      <p class="muted" id="task-list-info"></p>
       <ul id="tasks"></ul>
     </div>
   </section>

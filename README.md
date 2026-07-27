@@ -107,12 +107,19 @@ uv run repopilot serve
 | POST | `/api/tasks/{id}/resume` | 从最新 WorkflowState Checkpoint 恢复 |
 | POST | `/api/tasks/{id}/cancel` | 取消运行中任务 |
 | GET/POST | `/api/memory` | 跨任务记忆查询 / 手动写入 |
+| GET | `/api/runtime` | 安全公开运行模式、Demo/管理面状态与任务配额；不返回模型名、URL 或密钥 |
 | GET | `/health` `/ready` | 存活 / 就绪探针 |
 
 设置 `REPOPILOT_API_TOKEN` 后，所有 `/api/*` 需要 `Authorization: Bearer <token>`。
 设置 `REPOPILOT_DAILY_TASK_LIMIT` 后，系统会按代理传入的客户端地址哈希限制每天创建的研究任务数；
 额度写入 SQLite，重启不会清零，`0` 表示不限额。它只计算 `POST /api/tasks`，不会消耗查看报告、SSE
-或下载额度。公共 Demo 建议同时配置 API Token，并将 `REPOPILOT_DAILY_QUOTA_TIMEZONE` 设为部署地时区。
+或下载额度。
+
+公网演示建议设置 `REPOPILOT_PUBLIC_DEMO_MODE=true`、正数任务配额和部署地时区。此模式下研究任务仍
+可限额创建，但任务历史枚举、仓库注册/同步/归档、摄取、上传、Memory 与 `/metrics` 属于管理控制面：
+配置 `REPOPILOT_ADMIN_API_TOKEN` 后仅管理员 Bearer Token 可访问；不配置时这些操作直接 `403` 关闭，
+不会匿名开放。浏览器仅在当前页面内存保存输入的 Token；公开模式的普通访客只看到本页创建或凭
+不可猜测 UUID 主动打开的任务，刷新不会枚举共享历史。
 
 ## CLI
 
@@ -128,9 +135,9 @@ uv run repopilot eval                    # 跑固定离线评测并写 evals/rep
 
 ## 评测口径
 
-v1.5 的当前发布候选在 2026-07-27 使用 deterministic Provider、固定 30-case 数据集重新运行：
+v1.5 的当前发布版本在 2026-07-27 使用 deterministic Provider、固定 30-case 数据集重新运行：
 任务成功率、Recall@5、引用精确率/有效率和拒答准确率均为 `1.0`，unsupported answer、
-degraded 与 fallback case rate 均为 `0.0`。本机观测 P95 为 `373.233 ms`；这是离线
+degraded 与 fallback case rate 均为 `0.0`。本机观测 P95 为 `400.532 ms`；这是离线
 工作流/检索回归，不是线上 SLO，也不代表真实模型质量。评测 CLI 在一次性临时数据库中只摄取
 数据集声明的 `src/repopilot`，因此报告记录的是 33 个源码文档，不会读取产品库历史索引，也
 不会把基准语料写入产品库；产品库只保留最终 evaluation run 审计记录。报告同时保存

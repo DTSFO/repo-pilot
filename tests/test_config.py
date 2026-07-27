@@ -25,9 +25,15 @@ class SettingsTest(unittest.TestCase):
             Settings(_env_file=None, provider="openai_compatible")
 
     def test_blank_optional_secrets_are_treated_as_unset(self) -> None:
-        settings = Settings(_env_file=None, api_token="", llm_api_key="   ")
+        settings = Settings(
+            _env_file=None,
+            api_token="",
+            admin_api_token=" ",
+            llm_api_key="   ",
+        )
 
         self.assertIsNone(settings.api_token)
+        self.assertIsNone(settings.admin_api_token)
         self.assertIsNone(settings.llm_api_key)
 
     def test_fetch_hosts_are_normalized(self) -> None:
@@ -54,6 +60,17 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings.sse_heartbeat_seconds, 15.0)
         self.assertEqual(settings.daily_task_limit, 0)
         self.assertEqual(settings.daily_quota_timezone, "UTC")
+        self.assertFalse(settings.public_demo_mode)
+
+    def test_public_demo_requires_quota_when_general_api_token_is_unset(self) -> None:
+        with self.assertRaises(ValidationError):
+            Settings(_env_file=None, public_demo_mode=True)
+
+        settings = Settings(_env_file=None, public_demo_mode=True, daily_task_limit=5)
+        self.assertTrue(settings.public_demo_mode)
+
+        protected = Settings(_env_file=None, public_demo_mode=True, api_token="private")
+        self.assertTrue(protected.public_demo_mode)
 
     def test_daily_quota_timezone_must_be_valid(self) -> None:
         with self.assertRaises(ValidationError):

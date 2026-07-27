@@ -9,10 +9,10 @@
 
 | 检查 | v1.5 最终候选结果 |
 | --- | --- |
-| 单元/集成/API | 190 passed，1 个浏览器测试在默认套件中按设计 skipped；无意外跳过 |
+| 单元/集成/API | 193 passed，1 个浏览器测试在默认套件中按设计 skipped；无意外跳过 |
 | 静态、类型与依赖 | `uv lock --check --offline`、frozen sync、`uv pip check`、Ruff、format、strict Mypy 全通过 |
-| 分支覆盖率 | 87.32%，超过 85% 门槛 |
-| deterministic 30-case 回归 | 独立临时数据库只摄取 `src/repopilot`；task success、Recall@5、citation precision/validity、refusal accuracy 均为 1.0；unsupported answer、degraded/fallback 均为 0；P95 373.233ms |
+| 分支覆盖率 | 87.41%，超过 85% 门槛 |
+| deterministic 30-case 回归 | 独立临时数据库只摄取 `src/repopilot`；task success、Recall@5、citation precision/validity、refusal accuracy 均为 1.0；unsupported answer、degraded/fallback 均为 0；P95 400.532ms |
 | 浏览器产品流 | `REPOPILOT_RUN_BROWSER_TESTS=1`：1 passed；真实 Chromium 覆盖仓库添加、索引、任务、SSE、安全渲染、三种导出与移动视口 |
 | wheel/sdist 与 clean-wheel | 两次独立构建、独立 archive/metadata/secret 校验和逐字节比对通过；clean Python 3.12 环境安装、CLI、版本与 FastAPI app smoke 通过 |
 | Docker/Compose hardened smoke | Dockerfile check 无告警；真实容器非 root、只读 rootfs、drop ALL、no-new-privileges；应用正确读取只读 `/workspace`，数据/Git 使用持久卷；摄取→任务→Evidence 产品流通过 |
@@ -21,9 +21,9 @@
 ### v1.5 可追溯评测证据
 
 - `evals/dataset.json` SHA-256：`9d1522e97f22f29b05b4da6e57356ee59fa442dde7e29a991af1fbb334a29f9e`。
-- 当前 `evals/report.json` SHA-256：`9691f67918181c03dbe17c8e296f925b2470d4c2bd08422569df34a146fe1f96`。
-- 报告生成时间：`2026-07-27T13:58:57.516614Z`；隔离语料 33 documents，fingerprint
-  `f424f4ebcd43d4be4590b8bdc6bd4ce0efd4c50cc8032224107707b6d28c4cff`。
+- 当前 `evals/report.json` SHA-256：`e6c5c18066e525e5f16f3471a7f171b7113766a2b25705ee7b4024a0d9f5e11e`。
+- 报告生成时间：`2026-07-27T14:38:38.338536Z`；隔离语料 33 documents，fingerprint
+  `a72218ef48fb0fb0115d270ea928b428e32094a82e43582ef03a56088550c198`。
 - CLI 使用一次性 SQLite 执行摄取和评测，证明产品数据库不会接收 `SourceDocument`/Chunk；
   完成后只把不可变 `EvaluationRunRecord` 复制到产品数据库，兼顾可复现性与审计历史。
 - run config 明确记录 `orchestrator=langgraph`、`max_steps=12`、全任务 Tool 预算 40、
@@ -34,16 +34,18 @@
 ### v1.5 本地交付证据
 
 - tracked + 待提交源码共 76 个现存文件通过高置信 secret pattern 扫描。
-- 两个独立空目录构建及最终 `release/` 校验逐字节一致：wheel `102801` bytes，SHA-256
-  `e140b34cc88311f8156da04c664ff656229e0f11625cf79b67bc6ff25bea2344`；sdist `299118`
-  bytes，SHA-256 `9dde05ffe72545f37f9395ba02ae7414eacc0330e424a5e993717dffdd49cf1e`。
+- 两个独立空目录构建及校验逐字节一致：wheel `104399` bytes，SHA-256
+  `1919653160e0a7232f2e522087ac1d9ebca4948fd9b0ffff91f6a7523a39ee0b`；sdist `301940`
+  bytes，SHA-256 `d1487ced73cff89a918c02d5f6ecb27374fbb4a5d560ce4ed571191a7e613394`。
   两套外部 manifest/checksum、archive member、元数据和 secret 校验均通过，最终 wheel 在全新
   Python 3.12 venv 中通过版本、CLI 与 FastAPI routes smoke。
-- 最终容器镜像 ID 为
-  `sha256:c8bbc83245b87ceabcab61e68c318771ce349c3dfe6d03cee7ab7d69c1ac6a1e`；最终镜像按
-  Compose 加固配置先验证全新数据库不暴露虚假 ready revision，再实际摄取 69 个
-  `/workspace` 文档、生成 352 个 chunks，完成 `degraded=false` 任务并保存 5 条带
-  repository/revision scope 的 Evidence。
+- 最终本地容器镜像 ID 为
+  `sha256:8c0377eaf982e90d4a76bf98adb20ce8e68700007e707e234d988f3d297f4759`。隔离 Compose
+  冒烟启用 `PUBLIC_DEMO_MODE` 与每日 5 次配额，验证 runtime 明示 deterministic、管理面和
+  任务枚举在无管理员 Token 时返回 `403`；随后通过容器内管理 CLI 摄取 69 个 `/workspace`
+  文档、生成 356 个 chunks，公开创建任务后以 `completed`、`degraded=false` 结束，并保存
+  10 条 repository/revision scope 全匹配的 Evidence。非 root、只读 rootfs、drop ALL、
+  no-new-privileges 与可写数据卷边界同时通过。
 
 ### v1.5 架构验收口径
 
@@ -55,9 +57,11 @@
   通用 Multi-Agent 平台。
 - 当前产品范围是单用户、自托管、只读、多仓库研究。未测量的多租户、多副本、互联网规模
   吞吐和真实模型质量不属于 v1.5 声明。
+- 公网 Demo 使用独立管理面策略：限额任务创建与 UUID 结果读取可公开；任务枚举、仓库变更、
+  摄取/上传、Memory 与 metrics 在无管理员 Token 时 fail-closed 为 `403`，配置 Token 后才开放。
 - Compose 路径已实测：默认 legacy repository 指向 `/workspace`，本地 onboarding 只允许
-  `/workspace,/imports`，而非误读镜像 `/app`；本轮容器摄取 69 个挂载文档，任务
-  `completed`、`degraded=false` 并保存 5 条带 repository/revision scope 的 Evidence。
+  `/workspace,/imports`，而非误读镜像 `/app`；本轮容器摄取 69 个挂载文档、356 个 chunks，
+  任务 `completed`、`degraded=false` 并保存 10 条带 repository/revision scope 的 Evidence。
 
 ## v1.4.0 历史验收状态
 

@@ -9,7 +9,7 @@ from hashlib import sha256
 from http import HTTPStatus
 from pathlib import Path
 from time import perf_counter
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, File, Header, Query, Request, UploadFile
@@ -72,6 +72,12 @@ class AuthenticationError(RepoPilotError):
     code = "unauthorized"
     safe_message = "A valid API token is required."
     http_status = HTTPStatus.UNAUTHORIZED
+
+
+class AdminOperationsDisabledError(RepoPilotError):
+    code = "admin_operations_disabled"
+    safe_message = "Administrative operations are disabled for this public demo."
+    http_status = HTTPStatus.FORBIDDEN
 
 
 class RepositoryRequiredError(RepoPilotError):
@@ -200,6 +206,15 @@ class IngestResponse(BaseModel):
     unchanged_documents: int
     skipped_files: int
     chunks: int
+
+
+class RuntimeResponse(BaseModel):
+    provider_mode: Literal["deterministic", "live"]
+    public_demo: bool
+    api_token_required: bool
+    admin_access: Literal["open", "token_required", "disabled"]
+    task_history_access: Literal["open", "api_token", "admin_token", "session_only"]
+    daily_task_limit: int
 
 
 class SearchHit(BaseModel):
@@ -409,11 +424,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         expected = app_settings.api_token
         if expected is None:
             return
-        token = expected.get_secret_value()
-        if authorization != f"Bearer {token}":
+        accepted = {expected.get_secret_value()}
+        if app_settings.admin_api_token is not None:
+            accepted.add(app_settings.admin_api_token.get_secret_value())
+        if authorization not in {f"Bearer {token}" for token in accepted}:
             raise AuthenticationError()
 
+    async def require_admin_token(
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> None:
+        expected = app_settings.admin_api_token or app_settings.api_token
+        if expected is None:
+            if app_settings.public_demo_mode:
+                raise AdminOperationsDisabledError()
+            return
+        if authorization != f"Bearer {expected.get_secret_value()}":
+            raise AuthenticationError()
+
+    async def require_task_list_access(
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> None:
+        if app_settings.public_demo_mode:
+            await require_admin_token(authorization)
+        else:
+            await require_token(authorization)
+
     Authorized = Depends(require_token)
+    AdminAuthorized = Depends(require_admin_token)
+    TaskListAuthorized = Depends(require_task_list_access)
 
     @app.get(
         "/api/repositories", response_model=list[RepositoryResponse], dependencies=[Authorized]
@@ -423,7 +461,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         records = await store.list_repositories()
         return [await repository_response(store, record) for record in records]
 
-    @app.post("/api/repositories", status_code=201, dependencies=[Authorized])
+    @app.post("/api/repositories", status_code=201, dependencies=[AdminAuthorized])
     async def create_repository(
         payload: CreateRepositoryRequest,
         request: Request,
@@ -443,7 +481,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise RepositoryNotFoundError(details={"repository_id": record.id})
         return await repository_response(store, refreshed)
 
-    @app.post("/api/repositories/{repository_id}/sync", dependencies=[Authorized])
+    @app.post("/api/repositories/{repository_id}/sync", dependencies=[AdminAuthorized])
     async def sync_repository(
         repository_id: str,
         request: Request,
@@ -456,7 +494,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise RepositoryNotFoundError(details={"repository_id": repository_id})
         return await repository_response(store, record)
 
-    @app.delete("/api/repositories/{repository_id}", status_code=204, dependencies=[Authorized])
+    @app.delete(
+        "/api/repositories/{repository_id}", status_code=204, dependencies=[AdminAuthorized]
+    )
     async def archive_repository(
         repository_id: str,
         manager: RepositoryManager = Depends(get_repository_manager),
@@ -475,7 +515,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             headers=headers,
         )
 
-    @app.get("/metrics")
+    @app.get("/api/runtime", response_model=RuntimeResponse)
+    async def runtime() -> RuntimeResponse:
+        admin_secret = app_settings.admin_api_token or app_settings.api_token
+        if app_settings.public_demo_mode and admin_secret is None:
+            admin_access: Literal["open", "token_required", "disabled"] = "disabled"
+            task_history_access: Literal["open", "api_token", "admin_token", "session_only"] = (
+                "session_only"
+            )
+        elif app_settings.public_demo_mode:
+            admin_access = "token_required"
+            task_history_access = "admin_token"
+        else:
+            admin_access = "token_required" if admin_secret is not None else "open"
+            task_history_access = "api_token" if app_settings.api_token is not None else "open"
+        return RuntimeResponse(
+            provider_mode=("deterministic" if app_settings.provider == "deterministic" else "live"),
+            public_demo=app_settings.public_demo_mode,
+            api_token_required=app_settings.api_token is not None,
+            admin_access=admin_access,
+            task_history_access=task_history_access,
+            daily_task_limit=app_settings.daily_task_limit,
+        )
+
+    @app.get("/metrics", dependencies=[AdminAuthorized])
     async def metrics() -> Response:
         payload, content_type = metrics_payload()
         return Response(content=payload, media_type=content_type)
@@ -522,7 +585,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return TaskResponse.from_record(record)
 
-    @app.get("/api/tasks", response_model=list[TaskSummaryResponse], dependencies=[Authorized])
+    @app.get(
+        "/api/tasks",
+        response_model=list[TaskSummaryResponse],
+        dependencies=[TaskListAuthorized],
+    )
     async def list_tasks(
         request: Request,
         limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -640,7 +707,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> TaskResponse:
         return TaskResponse.from_record(await service.cancel_task(task_id))
 
-    @app.post("/api/ingest", dependencies=[Authorized])
+    @app.post("/api/ingest", dependencies=[AdminAuthorized])
     async def ingest(payload: IngestRequest, request: Request) -> IngestResponse:
         repository = await resolve_repository(request, payload.repository_id)
         manager: RepositoryManager = request.app.state.repository_manager
@@ -673,7 +740,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             chunks=int(stats.get("chunks", 0)),
         )
 
-    @app.post("/api/documents", status_code=201, dependencies=[Authorized])
+    @app.post("/api/documents", status_code=201, dependencies=[AdminAuthorized])
     async def upload_document(
         request: Request,
         file: UploadFile = File(...),
@@ -738,7 +805,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             EvidenceResponse.from_record(record) for record in await evidence.list_evidence(task_id)
         ]
 
-    @app.get("/api/memory", dependencies=[Authorized])
+    @app.get("/api/memory", dependencies=[AdminAuthorized])
     async def list_memory(
         request: Request,
         memory_type: Annotated[str | None, Query(max_length=24)] = None,
@@ -748,7 +815,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         records = await memory.list_memories(memory_type=memory_type, limit=limit)
         return [MemoryResponse.from_record(record) for record in records]
 
-    @app.post("/api/memory", status_code=201, dependencies=[Authorized])
+    @app.post("/api/memory", status_code=201, dependencies=[AdminAuthorized])
     async def create_memory(payload: MemoryCreateRequest, request: Request) -> MemoryResponse:
         memory: MemoryStore = request.app.state.memory
         record = await memory.add_memory(
