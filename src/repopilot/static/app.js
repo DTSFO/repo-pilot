@@ -1,5 +1,10 @@
 const $ = (id) => document.getElementById(id);
 const TASK_STATUS_CLASSES = new Set(['pending','running','completed','guarded','failed','cancelled']);
+const DEMO_TASK_IDS = [
+  'b16c5f00-924d-48ce-b175-e93c591a412a',
+  '6eb84295-7ef1-4412-a615-442356cf7a87',
+  '70ac07e9-43a1-4e71-ab75-371f8fbecef8',
+];
 let currentTask = null;
 let currentRepository = null;
 let streamController = null;
@@ -9,6 +14,7 @@ let runtimeInfo = {
   admin_access: 'open', task_history_access: 'open', daily_task_limit: 0,
 };
 const sessionTasks = new Map();
+let demoTasksLoaded = false;
 
 function requestApiToken() {
   const supplied = window.prompt('RepoPilot API Token（仅保存在当前页面内存）');
@@ -69,7 +75,18 @@ function renderSessionTasks() {
     .filter((task) => !currentRepository || task.repository_id === currentRepository)
     .reverse();
   renderTaskList(tasks);
-  $('task-list-info').textContent = '公开模式仅显示当前页面创建或打开的任务；刷新后不会枚举他人历史。';
+  $('task-list-info').textContent = '公开模式显示三份固定示例及当前页面创建或打开的任务，不会枚举他人历史。';
+}
+
+async function loadDemoTasks() {
+  if (!runtimeInfo.public_demo || demoTasksLoaded) return;
+  const results = await Promise.allSettled(
+    DEMO_TASK_IDS.map((taskId) => api(`/api/tasks/${encodeURIComponent(taskId)}`)),
+  );
+  for (const result of results) {
+    if (result.status === 'fulfilled' && result.value?.final_report) rememberTask(result.value);
+  }
+  demoTasksLoaded = true;
 }
 
 async function refreshRuntime() {
@@ -130,7 +147,7 @@ async function refreshRepositories() {
 async function refreshTasks() {
   if (runtimeInfo.task_history_access === 'session_only' ||
       (runtimeInfo.task_history_access === 'admin_token' && !apiToken)) {
-    renderSessionTasks(); return;
+    await loadDemoTasks(); renderSessionTasks(); return;
   }
   const suffix = currentRepository ? `?repository_id=${encodeURIComponent(currentRepository)}` : '';
   const response = await request(`/api/tasks${suffix}`);
